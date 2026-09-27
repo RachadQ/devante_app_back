@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "functions": {
+    "server.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{.venv/**,venv/**,uploads/**,tests/**,.pytest_cache/**,.ruff_cache/**,.cache/**,.paddlex/**,.paddleocr/**,.env,.env.*,requirements-local.txt,requirements-dev.txt,**/__pycache__/**}"
+    }
+  },
+  "env": {
+    "OCR_ENGINE": "rapid"
+  }
+}

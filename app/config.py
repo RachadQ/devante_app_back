@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -14,6 +14,8 @@ class Settings(BaseSettings):
         env_file=BACKEND_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        env_ignore_empty=True,
+        hide_input_in_errors=True,
     )
 
     app_env: Literal["development", "production"] = "production"
@@ -101,12 +103,12 @@ class Settings(BaseSettings):
             raise RuntimeError("Secure cookies are required in production")
         if not self.microsoft_client_id or not self.microsoft_client_secret:
             raise RuntimeError("Microsoft OAuth credentials are required in production")
-        if self.microsoft_tenant_id.strip().lower() in {"common", "organizations", "consumers"}:
+        if self.microsoft_tenant_id.strip().lower() in {"", "common", "organizations", "consumers"}:
             raise RuntimeError("A tenant-specific Microsoft tenant ID is required in production")
         if self.dev_auth_bypass:
             raise RuntimeError("Development authentication bypass is forbidden in production")
-        if "*" in self.origins:
-            raise RuntimeError("Wildcard CORS is forbidden in production")
+        if not self.origins or "*" in self.origins:
+            raise RuntimeError("Explicit CORS origins are required in production")
         if urlparse(self.frontend_url).scheme != "https":
             raise RuntimeError("FRONTEND_URL must use HTTPS in production")
         if any(urlparse(origin).scheme != "https" for origin in self.origins):
@@ -119,6 +121,13 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    settings = Settings()  # type: ignore[call-arg]
+    try:
+        settings = Settings()  # type: ignore[call-arg]
+    except ValidationError as exc:
+        fields = sorted({str(error["loc"][0]).upper() for error in exc.errors(include_input=False)})
+        raise RuntimeError(
+            "Missing or invalid environment variables: " + ", ".join(fields)
+            + ". Set their values in the deployment environment and redeploy."
+        ) from None
     settings.validate_production()
     return settings

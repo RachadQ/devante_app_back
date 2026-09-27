@@ -12,7 +12,7 @@ FastAPI backend modeled on the reference administration portal, with MongoDB rep
 - Soft deletion, immutable audit events, unique identities, production startup checks
 - Secrets are environment-only; Swagger is disabled in production
 
-## Run
+## Run locally
 
 ```powershell
 Copy-Item .env.example .env
@@ -37,6 +37,42 @@ python scripts/seed_admin.py
 MongoDB creates the required collections and indexes during application startup. Use a replica set in production for durability and transactions, TLS-enabled `mongodb+srv://` credentials from a secret manager, network allowlists, encryption at rest, and a least-privilege database user.
 
 Set `ALLOWED_EMAIL_DOMAINS` to a comma-separated list such as `example.com,example.org` to restrict Microsoft sign-in. Leave it empty to accept any email identity verified by the configured Microsoft tenant.
+
+## Deploy to Vercel
+
+Use this backend directory as the Vercel project root and select the FastAPI
+framework preset. The existing `server.py` exports `app` from `app.main` and is a
+supported entrypoint; no `api/index.py` wrapper is needed. Routes keep their
+existing paths, such as `/health` and `/receipts`, without adding `/api`.
+
+The committed `vercel.json` selects FastAPI, excludes local-only files from the
+function bundle, sets a 300-second function duration, and selects RapidOCR.
+`.python-version` pins Python 3.12. OCR imports are deferred until needed; on
+Vercel, downloaded OCR models are cached in temporary writable storage.
+
+Keep the existing `requirements.txt`. Do not replace it with
+`requirements-local.txt`: that file includes the large PaddleOCR stack and
+references `requirements.txt` itself.
+
+Leave build/install overrides at their framework defaults. Do not configure a
+Uvicorn start command or run the local virtual-environment commands during
+deployment. Configure the production environment variables from `.env.example`
+in Vercel, with `OCR_ENGINE=rapid` and the actual frontend/backend origins and
+hostnames. Redeploy without the build cache after dependency changes.
+
+See the [Vercel FastAPI documentation](https://vercel.com/docs/frameworks/backend/fastapi).
+
+If logs show `ValidationError` with `input_value=''`, the deployment environment
+variables were saved with empty values. In Vercel project Settings → Environment
+Variables, populate `MONGODB_URI` (including the database name), `JWT_SECRET` and
+`SESSION_SECRET` (different random secrets, each at least 32 characters),
+`FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`, `TRUSTED_HOSTS`, and all three
+`MICROSOFT_*` settings. Use the frontend HTTPS origin for the frontend and CORS
+values, and `devante-app-back.vercel.app` for this backend's trusted host.
+Set these for the deployment's environment, then redeploy. Never paste secrets
+into logs or commit them. Blank optional settings use defaults; secure cookies
+default to `true` and SameSite defaults to `lax`. Required settings still fail
+closed when missing.
 
 ## Receipts, RFI, OCR, and Google Drive
 
