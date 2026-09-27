@@ -49,6 +49,10 @@ excludes local virtual environments, model caches, uploads, and development file
 Redeploy without the previous build cache after changing the dependency set;
 verify the resulting function size in the deployment build output.
 
+Drive storage uses the REST API with `google-auth[requests]` for service-account
+authentication. The large `google-api-python-client` discovery library is not
+needed for folder creation, file uploads, or downloads and is excluded from dependencies.
+
 Local development uses `requirements-local.txt`, which adds PaddleOCR
 and keeps `OCR_ENGINE=paddle` as the primary engine with RapidOCR as its fallback.
 Installing into an existing environment does not uninstall old dependencies;
