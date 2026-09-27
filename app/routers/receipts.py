@@ -25,8 +25,42 @@ from app.services.receipt_jobs import enqueue_preview_job, process_preview_job_b
 
 router = APIRouter(prefix="/receipts", tags=["receipts"])
 settings = get_settings()
-ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
+ALLOWED_TYPES = {
+    "image/jpeg", "image/png", "image/webp", "application/pdf",
+    "image/heic", "image/heif", "image/jpg", "image/pjpeg", "image/x-png", "application/x-pdf",
+}
+MIME_ALIASES = {
+    "image/jpg": "image/jpeg",
+    "image/pjpeg": "image/jpeg",
+    "image/x-png": "image/png",
+    "application/x-pdf": "application/pdf",
+    "image/heic": "image/heic",
+    "image/heif": "image/heif",
+}
 CATEGORIES = {"gas", "client_meals", "maintenance", "job_expense", "other"}
+
+
+def _normalize_upload_mime(content_type: str | None, filename: str | None, content: bytes) -> str:
+    ct = (content_type or "").lower().split(";")[0].strip()
+    ct = MIME_ALIASES.get(ct, ct)
+    if not ct or ct == "application/octet-stream":
+        if content.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if content.startswith(b"RIFF") and len(content) > 12 and content[8:12] == b"WEBP":
+            return "image/webp"
+        if content.startswith(b"%PDF"):
+            return "application/pdf"
+        ext = Path(filename or "").suffix.lower()
+        ext_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg",
+            ".png": "image/png", ".webp": "image/webp", ".pdf": "application/pdf",
+            ".heic": "image/heic", ".heif": "image/heif",
+        }
+        if ext in ext_map:
+            return ext_map[ext]
+    return ct
 
 
 class ReceiptUpdate(BaseModel):
@@ -42,51 +76,110 @@ class ReceiptUpdate(BaseModel):
     fuel_litres: float | None = Field(default=None, gt=0, le=10000, allow_inf_nan=False)
 
 
-@router.post("/preview", status_code=202)
-async def preview_receipt_ocr(
-    file: UploadFile = File(...), document_type: str = Form("receipt"),
-    actor: dict = Depends(require_permission("RECEIPTS_CREATE")),
-):
-    """Queue OCR and return immediately; temporary bytes are removed after processing."""
-    if file.content_type not in ALLOWED_TYPES:
-        raise HTTPException(415, "Upload a JPEG, PNG, WebP, or PDF file")
+async def _create_single_preview_job(
+    file: UploadFile,
+    document_type: str,
+    actor_id: UUID,
+    db: Any,
+    bucket: AsyncIOMotorGridFSBucket,
+) -> dict[str, Any]:
     content = await file.read(settings.max_upload_bytes + 1)
     if len(content) > settings.max_upload_bytes:
-        raise HTTPException(413, "File is larger than the configured upload limit")
-    if document_type not in {"receipt", "rfi"}:
-        raise HTTPException(422, "Document type must be receipt or rfi")
-    db = get_database()
-    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="ocr_preview_uploads")
+        raise HTTPException(413, f"File '{file.filename}' exceeds upload limit of {settings.max_upload_bytes // (1024*1024)}MB")
+
+    mime_type = _normalize_upload_mime(file.content_type, file.filename, content)
+    if mime_type not in ALLOWED_TYPES:
+        raise HTTPException(415, f"Unsupported file type for '{file.filename}'. Upload JPEG, PNG, WebP, or PDF.")
+
     job_id = uuid4()
     filename = _safe_filename(file.filename or "upload")
+    now = utcnow()
+    expires_at = now + timedelta(hours=1)
+    file_id = None
     try:
-        now = utcnow()
-        expires_at = now + timedelta(hours=1)
         file_id = await bucket.upload_from_stream(
-            filename, content, metadata={"job_id": str(job_id), "mime_type": file.content_type,
-                                         "expires_at": expires_at},
+            filename, content, metadata={"job_id": str(job_id), "mime_type": mime_type, "expires_at": expires_at},
         )
         await db.ocr_preview_jobs.insert_one({
             "_id": job_id, "status": "queued", "gridfs_file_id": file_id,
-            "filename": filename, "mime_type": file.content_type, "size_bytes": len(content),
+            "filename": filename, "mime_type": mime_type, "size_bytes": len(content),
             "document_type": document_type,
-            "created_by": actor["_id"], "created_at": now, "updated_at": now,
+            "created_by": actor_id, "created_at": now, "updated_at": now,
             "expires_at": expires_at,
         })
     except Exception:
-        if "file_id" in locals():
+        if file_id is not None:
             with suppress(Exception):
                 await bucket.delete(file_id)
         raise
     await enqueue_preview_job(job_id)
-    return {"job_id": str(job_id), "status": "queued"}
+    return {"job_id": str(job_id), "filename": filename, "status": "queued"}
+
+
+@router.post("/preview", status_code=202)
+async def preview_receipt_ocr(
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+    document_type: str = Form("receipt"),
+    actor: dict = Depends(require_permission("RECEIPTS_CREATE")),
+):
+    """Queue OCR preview for single or multiple uploaded files (e.g. mobile multi-select)."""
+    if document_type not in {"receipt", "rfi"}:
+        raise HTTPException(422, "Document type must be receipt or rfi")
+
+    upload_list: list[UploadFile] = []
+    if files:
+        upload_list.extend(files)
+    if file:
+        upload_list.append(file)
+    if not upload_list:
+        raise HTTPException(422, "No upload file provided")
+
+    db = get_database()
+    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="ocr_preview_uploads")
+    created_jobs = []
+    for uploaded in upload_list:
+        job_info = await _create_single_preview_job(uploaded, document_type, actor["_id"], db, bucket)
+        created_jobs.append(job_info)
+
+    return {"job_id": created_jobs[0]["job_id"], "status": "queued", "jobs": created_jobs}
+
+
+@router.post("/preview/batch", status_code=202)
+@router.post("/preview-batch", status_code=202)
+async def preview_receipt_ocr_batch(
+    files: list[UploadFile] = File(...),
+    document_type: str = Form("receipt"),
+    actor: dict = Depends(require_permission("RECEIPTS_CREATE")),
+):
+    """Explicit batch endpoint for multi-image mobile uploads."""
+    if document_type not in {"receipt", "rfi"}:
+        raise HTTPException(422, "Document type must be receipt or rfi")
+    if not files:
+        raise HTTPException(422, "No upload files provided")
+
+    db = get_database()
+    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="ocr_preview_uploads")
+    created_jobs = []
+    for uploaded in files:
+        job_info = await _create_single_preview_job(uploaded, document_type, actor["_id"], db, bucket)
+        created_jobs.append(job_info)
+
+    return {"jobs": created_jobs, "count": len(created_jobs)}
 
 
 @router.get("/preview-jobs")
 async def list_receipt_preview_jobs(actor: dict = Depends(require_permission("RECEIPTS_CREATE"))):
+    db = get_database()
     query = {"created_by": actor["_id"], "expires_at": {"$gt": utcnow()}}
+
+    # Process any queued jobs for this user so multi-image mobile batches update immediately
+    queued_jobs = [j["_id"] async for j in db.ocr_preview_jobs.find({**query, "status": "queued"})]
+    for q_id in queued_jobs:
+        await process_preview_job_by_id(q_id)
+
     jobs = []
-    async for job in get_database().ocr_preview_jobs.find(query).sort("created_at", -1):
+    async for job in db.ocr_preview_jobs.find(query).sort("created_at", -1):
         item = {
             "job_id": str(job["_id"]), "status": job["status"],
             "filename": job["filename"], "documentType": job.get("document_type", "receipt"),
@@ -98,6 +191,7 @@ async def list_receipt_preview_jobs(actor: dict = Depends(require_permission("RE
             item["error"] = job.get("error", "OCR preview failed")
         jobs.append(item)
     return jobs
+
 
 
 @router.get("/preview/{job_id}")
@@ -203,14 +297,15 @@ async def upload_receipt(
             raise HTTPException(422, "Vehicle not found")
     if fuel_litres is not None and (vehicle_id is None or category != "gas"):
         raise HTTPException(422, "Fuel litres require a vehicle and gas category")
-    if file.content_type not in ALLOWED_TYPES:
-        raise HTTPException(415, "Upload a JPEG, PNG, WebP, or PDF file")
     content = await file.read(settings.max_upload_bytes + 1)
     if len(content) > settings.max_upload_bytes:
         raise HTTPException(413, "File is larger than the configured upload limit")
+    mime_type = _normalize_upload_mime(file.content_type, file.filename, content)
+    if mime_type not in ALLOWED_TYPES:
+        raise HTTPException(415, "Upload a JPEG, PNG, WebP, or PDF file")
     filename = _safe_filename(file.filename or "upload")
     ocr_text = ocr_text_override.strip() if ocr_text_override is not None else ""
-    if ocr_text_override is None and file.content_type.startswith("image/"):
+    if ocr_text_override is None and mime_type.startswith("image/"):
         try:
             ocr_text = await asyncio.to_thread(extract_text, content)
         except Exception:
