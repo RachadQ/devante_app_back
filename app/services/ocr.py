@@ -20,26 +20,28 @@ _engine_lock = Lock()
 logger = logging.getLogger(__name__)
 
 
-def _get_rapid_engine() -> Any:
-    global _rapid_engine
-    if _rapid_engine is None:
-        # Native OCR libraries are only required by OCR requests, not API startup.
-        from rapidocr import RapidOCR
-
-        model_dir = Path(gettempdir()) / "rapidocr-models"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        params = {"Global.model_root_dir": str(model_dir)}
-        _rapid_engine = RapidOCR(params=params)
-    return _rapid_engine
-
-
 def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
-    result = _get_rapid_engine()(image)
-    if not result or not result.txts:
-        return "", None
-    lines = [str(line).strip() for line in result.txts if line]
-    scores = [float(score) for score in (result.scores if result.scores is not None else []) if score is not None]
-    return "\n".join(lines), (sum(scores) / len(scores) if scores else None)
+    global _rapid_engine, _rapid_failed
+    if _rapid_failed:
+        raise RuntimeError("RapidOCR is unavailable")
+    try:
+        if _rapid_engine is None:
+            # Native OCR libraries are only required by OCR requests, not API startup.
+            from rapidocr import RapidOCR
+
+            params = None
+            if os.environ.get("VERCEL") == "1":
+                params = {"Global.model_root_dir": str(Path(gettempdir()) / "rapidocr-models")}
+            _rapid_engine = RapidOCR(params=params)
+        result = _rapid_engine(image)
+        if not result or not result.txts:
+            return "", None
+        lines = [str(line).strip() for line in result.txts if line]
+        scores = [float(score) for score in (result.scores if result.scores is not None else []) if score is not None]
+        return "\n".join(lines), (sum(scores) / len(scores) if scores else None)
+    except Exception:
+        _rapid_failed = True
+        raise
 
 
 def _paddle_payload(result: Any) -> dict[str, Any]:
@@ -92,18 +94,10 @@ def _extract_with_paddle(image: Image.Image) -> tuple[str, float | None]:
 
 def warm_ocr_engine() -> None:
     """Load OCR models before the first receipt without retaining document data."""
-    settings = get_settings()
+    if get_settings().ocr_engine != "paddle":
+        return
     with _engine_lock:
-        if settings.ocr_engine == "paddle":
-            try:
-                _get_paddle_engine()
-            except Exception as exc:
-                logger.warning("PaddleOCR warm-up failed: %s", exc)
-        elif settings.ocr_engine == "rapid":
-            try:
-                _get_rapid_engine()
-            except Exception as exc:
-                logger.warning("RapidOCR warm-up failed: %s", exc)
+        _get_paddle_engine()
 
 
 def extract_document(content: bytes) -> dict[str, str | float | None]:
