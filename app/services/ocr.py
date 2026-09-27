@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -15,32 +16,49 @@ from app.config import get_settings
 _rapid_engine: Any = None
 _paddle_engine: Any = None
 _paddle_failed = False
-_rapid_failed = False
 _engine_lock = Lock()
 logger = logging.getLogger(__name__)
 
 
-def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
-    global _rapid_engine, _rapid_failed
-    if _rapid_failed:
-        raise RuntimeError("RapidOCR is unavailable")
-    try:
-        if _rapid_engine is None:
+def _get_rapid_engine() -> Any:
+    global _rapid_engine
+    if _rapid_engine is None:
+        model_dir = Path(gettempdir()) / "rapidocr-models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("[OCR-STEP] Initializing RapidOCR engine (model_dir=%s)", model_dir)
+        try:
             # Native OCR libraries are only required by OCR requests, not API startup.
             from rapidocr import RapidOCR
 
-            params = None
-            if os.environ.get("VERCEL") == "1":
-                params = {"Global.model_root_dir": str(Path(gettempdir()) / "rapidocr-models")}
+            params = {"Global.model_root_dir": str(model_dir)}
             _rapid_engine = RapidOCR(params=params)
-        result = _rapid_engine(image)
+            logger.info("[OCR-STEP] RapidOCR engine initialized successfully")
+        except Exception as exc:
+            logger.exception("[OCR-STEP] RapidOCR engine initialization failed: %s", exc)
+            raise
+    return _rapid_engine
+
+
+def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
+    start = time.perf_counter()
+    logger.info("[OCR-STEP] Running RapidOCR inference (image size=%sx%s)", image.size[0], image.size[1])
+    try:
+        engine = _get_rapid_engine()
+        result = engine(image)
+        elapsed = time.perf_counter() - start
         if not result or not result.txts:
+            logger.info("[OCR-STEP] RapidOCR finished in %.2fs: no text detected", elapsed)
             return "", None
         lines = [str(line).strip() for line in result.txts if line]
         scores = [float(score) for score in (result.scores if result.scores is not None else []) if score is not None]
-        return "\n".join(lines), (sum(scores) / len(scores) if scores else None)
-    except Exception:
-        _rapid_failed = True
+        avg_score = (sum(scores) / len(scores)) if scores else None
+        logger.info(
+            "[OCR-STEP] RapidOCR finished in %.2fs: %d text blocks extracted, avg confidence: %s",
+            elapsed, len(lines), f"{avg_score:.2f}" if avg_score is not None else "None"
+        )
+        return "\n".join(lines), avg_score
+    except Exception as exc:
+        logger.exception("[OCR-STEP] RapidOCR inference failed: %s", exc)
         raise
 
 
@@ -56,14 +74,20 @@ def _paddle_payload(result: Any) -> dict[str, Any]:
 def _get_paddle_engine() -> Any:
     global _paddle_engine
     if _paddle_engine is None:
-        from paddleocr import PaddleOCR
-        _paddle_engine = PaddleOCR(
-            text_detection_model_name="PP-OCRv5_mobile_det",
-            text_recognition_model_name="PP-OCRv5_mobile_rec",
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-        )
+        logger.info("[OCR-STEP] Initializing PaddleOCR engine")
+        try:
+            from paddleocr import PaddleOCR
+            _paddle_engine = PaddleOCR(
+                text_detection_model_name="PP-OCRv5_mobile_det",
+                text_recognition_model_name="PP-OCRv5_mobile_rec",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+            logger.info("[OCR-STEP] PaddleOCR engine initialized successfully")
+        except Exception as exc:
+            logger.exception("[OCR-STEP] PaddleOCR engine initialization failed: %s", exc)
+            raise
     return _paddle_engine
 
 
@@ -73,8 +97,11 @@ def _extract_with_paddle(image: Image.Image) -> tuple[str, float | None]:
     global _paddle_failed
     if _paddle_failed:
         raise RuntimeError("PaddleOCR is unavailable")
+    start = time.perf_counter()
+    logger.info("[OCR-STEP] Running PaddleOCR inference (image size=%sx%s)", image.size[0], image.size[1])
     try:
         output = _get_paddle_engine().predict(np.asarray(image))
+        elapsed = time.perf_counter() - start
         lines: list[str] = []
         scores: list[float] = []
         for item in output:
@@ -86,21 +113,40 @@ def _extract_with_paddle(image: Image.Image) -> tuple[str, float | None]:
             if not lines:
                 lines.extend(str(value).strip() for value in overall.get("rec_texts", []) if value)
             scores.extend(float(value) for value in overall.get("rec_scores", []) if value is not None)
-        return "\n".join(line for line in lines if line), (sum(scores) / len(scores) if scores else None)
-    except Exception:
+        avg_score = (sum(scores) / len(scores)) if scores else None
+        logger.info(
+            "[OCR-STEP] PaddleOCR finished in %.2fs: %d text blocks extracted, avg confidence: %s",
+            elapsed, len(lines), f"{avg_score:.2f}" if avg_score is not None else "None"
+        )
+        return "\n".join(line for line in lines if line), avg_score
+    except Exception as exc:
         _paddle_failed = True
+        logger.exception("[OCR-STEP] PaddleOCR inference failed: %s", exc)
         raise
 
 
 def warm_ocr_engine() -> None:
     """Load OCR models before the first receipt without retaining document data."""
-    if get_settings().ocr_engine != "paddle":
-        return
+    settings = get_settings()
+    logger.info("[OCR-STEP] warm_ocr_engine invoked (configured engine: %s)", settings.ocr_engine)
     with _engine_lock:
-        _get_paddle_engine()
+        if settings.ocr_engine == "paddle":
+            try:
+                _get_paddle_engine()
+                logger.info("[OCR-STEP] PaddleOCR engine warm-up complete")
+            except Exception as exc:
+                logger.warning("[OCR-STEP] PaddleOCR warm-up failed: %s", exc)
+        elif settings.ocr_engine == "rapid":
+            try:
+                _get_rapid_engine()
+                logger.info("[OCR-STEP] RapidOCR engine warm-up complete")
+            except Exception as exc:
+                logger.warning("[OCR-STEP] RapidOCR warm-up failed: %s", exc)
 
 
 def extract_document(content: bytes) -> dict[str, str | float | None]:
+    start = time.perf_counter()
+    logger.info("[OCR-STEP] extract_document called (content size=%d bytes)", len(content))
     image = ImageOps.exif_transpose(Image.open(BytesIO(content))).convert("RGB")
     settings = get_settings()
     with _engine_lock:
@@ -108,17 +154,29 @@ def extract_document(content: bytes) -> dict[str, str | float | None]:
             try:
                 text, confidence = _extract_with_paddle(image)
                 if text:
+                    elapsed = time.perf_counter() - start
+                    logger.info(
+                        "[OCR-STEP] extract_document completed via paddle in %.2fs (confidence: %s, text length: %d)",
+                        elapsed, f"{confidence:.2f}" if confidence is not None else "None", len(text)
+                    )
                     return {"text": text, "engine": "paddle-ppocrv5-mobile", "confidence": confidence}
             except Exception as exc:
                 # Never log OCR text or image contents; only report why the local
                 # high-accuracy engine could not start before using the fallback.
-                logger.warning("PaddleOCR unavailable; using RapidOCR fallback: %s", exc)
+                logger.warning("[OCR-STEP] PaddleOCR unavailable; using RapidOCR fallback: %s", exc)
         try:
             text, confidence = _extract_with_rapid(image)
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "[OCR-STEP] extract_document completed via rapidocr in %.2fs (confidence: %s, text length: %d)",
+                elapsed, f"{confidence:.2f}" if confidence is not None else "None", len(text)
+            )
             return {"text": text, "engine": "rapidocr-fallback", "confidence": confidence}
         except Exception as exc:
-            logger.warning("RapidOCR unavailable: %s", exc)
+            elapsed = time.perf_counter() - start
+            logger.warning("[OCR-STEP] RapidOCR unavailable in %.2fs: %s", elapsed, exc)
             return {"text": "", "engine": "unavailable", "confidence": None}
+
 
 
 def extract_text(content: bytes) -> str:

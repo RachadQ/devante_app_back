@@ -41,29 +41,42 @@ async def cleanup_expired_preview_jobs() -> int:
 
 
 async def _claim_job() -> dict[str, Any] | None:
-    return await get_database().ocr_preview_jobs.find_one_and_update(
+    job = await get_database().ocr_preview_jobs.find_one_and_update(
         {"status": "queued"},
         {"$set": {"status": "processing", "started_at": utcnow(), "updated_at": utcnow()}},
         sort=[("created_at", 1)],
         return_document=ReturnDocument.AFTER,
     )
+    if job:
+        logger.info("[JOB-STEP] Claimed queued OCR preview job (job_id=%s, mime=%s)", job["_id"], job.get("mime_type"))
+    return job
 
 
 async def _process_job(job: dict[str, Any]) -> None:
+    job_id = str(job["_id"])
+    logger.info("[JOB-STEP] Beginning process_job for %s (mime=%s)", job_id, job.get("mime_type"))
     db = get_database()
     bucket = AsyncIOMotorGridFSBucket(db, bucket_name="ocr_preview_uploads")
     # Keep the temporary upload after OCR so the user can refresh, reopen the
     # preview, and confirm without uploading the receipt a second time.
     delete_upload = False
     try:
+        logger.info("[JOB-STEP] Downloading file from GridFS (file_id=%s)", job.get("gridfs_file_id"))
         stream = await bucket.open_download_stream(job["gridfs_file_id"])
         content = await stream.read()
+        logger.info("[JOB-STEP] Downloaded %d bytes from GridFS for job %s", len(content), job_id)
         if job["mime_type"].startswith("image/"):
+            logger.info("[JOB-STEP] Launching extract_document in background thread for job %s", job_id)
             extraction = await asyncio.to_thread(extract_document, content)
             text = str(extraction["text"])
+            fields = suggested_fields(text)
+            logger.info(
+                "[JOB-STEP] extract_document returned for job %s: engine=%s, confidence=%s, detected_fields=%s",
+                job_id, extraction["engine"], extraction["confidence"], list(fields.keys())
+            )
             result = {
                 "ocr_text": text,
-                **suggested_fields(text),
+                **fields,
                 "ocr_engine": extraction["engine"],
                 "ocr_confidence": extraction["confidence"],
                 "message": (
@@ -73,6 +86,7 @@ async def _process_job(job: dict[str, Any]) -> None:
                 ),
             }
         else:
+            logger.info("[JOB-STEP] Non-image document (%s) uploaded for job %s; skipping OCR", job["mime_type"], job_id)
             result = {
                 "ocr_text": "",
                 **suggested_fields(""),
@@ -85,20 +99,23 @@ async def _process_job(job: dict[str, Any]) -> None:
             {"$set": {"status": "completed", "result": result, "completed_at": utcnow(),
                       "updated_at": utcnow(), "expires_at": utcnow() + timedelta(hours=1)}},
         )
+        logger.info("[JOB-STEP] Job %s successfully marked as completed in MongoDB", job_id)
     except asyncio.CancelledError:
+        logger.warning("[JOB-STEP] Job %s was cancelled, resetting to queued status", job_id)
         await db.ocr_preview_jobs.update_one(
             {"_id": job["_id"], "status": "processing"},
             {"$set": {"status": "queued", "updated_at": utcnow()}, "$unset": {"started_at": ""}},
         )
         raise
     except Exception:
-        logger.exception("Receipt OCR preview job failed", extra={"job_id": str(job["_id"])})
+        logger.exception("[JOB-STEP] Receipt OCR preview job %s failed with exception", job_id, extra={"job_id": job_id})
         await db.ocr_preview_jobs.update_one(
             {"_id": job["_id"]},
             {"$set": {"status": "failed", "error": "OCR could not read this file. Try a clearer photo.",
                       "completed_at": utcnow(), "updated_at": utcnow(),
                       "expires_at": utcnow() + timedelta(hours=1)}},
         )
+
     finally:
         if delete_upload:
             with suppress(Exception):
