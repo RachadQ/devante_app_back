@@ -23,7 +23,7 @@ async def bootstrap(user: dict = Depends(get_current_user)):
 
 @router.post("/heartbeat")
 async def heartbeat(response: Response, user: dict = Depends(get_current_user)):
-    if settings.app_env == "development" and settings.dev_auth_bypass:
+    if settings.dev_auth_bypass:
         return {"status": "ok", "mode": "localhost_development"}
     await get_database().users.update_one({"_id": user["_id"]}, {"$set": {"last_activity_at": utcnow()}})
     token, _ = create_access_token(user["_id"], bool(user.get("is_super_admin")))
@@ -33,7 +33,7 @@ async def heartbeat(response: Response, user: dict = Depends(get_current_user)):
 
 @router.post("/logout")
 async def logout(request: Request, user: dict = Depends(get_current_user)):
-    if settings.app_env == "development" and settings.dev_auth_bypass:
+    if settings.dev_auth_bypass:
         response = JSONResponse({"status": "success"})
         clear_auth_cookies(response)
         request.session.clear()

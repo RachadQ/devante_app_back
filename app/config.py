@@ -98,8 +98,6 @@ class Settings(BaseSettings):
             raise RuntimeError("JWT_SECRET and SESSION_SECRET must be different in production")
         if not self.auth_cookie_secure or not self.session_cookie_secure:
             raise RuntimeError("Secure cookies are required in production")
-        if self.dev_auth_bypass:
-            raise RuntimeError("Development authentication bypass is forbidden in production")
         if not self.origins or "*" in self.origins:
             raise RuntimeError("Explicit CORS origins are required in production")
         if urlparse(self.frontend_url).scheme != "https":

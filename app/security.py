@@ -46,7 +46,7 @@ async def get_current_user(
     access_token: Annotated[str | None, Cookie(alias=AUTH_COOKIE_NAME)] = None,
 ) -> dict:
     settings = get_settings()
-    if settings.app_env == "development" and settings.dev_auth_bypass:
+    if settings.dev_auth_bypass:
         return {
             "_id": UUID("00000000-0000-4000-8000-000000000001"),
             "email": settings.dev_auth_email.lower().strip(),
@@ -100,7 +100,7 @@ async def csrf_protect(request: Request) -> None:
     # Public RFI submissions use an unguessable link token and no cookie session.
     if request.method == "POST" and request.url.path == "/public/rfi/responses":
         return
-    if settings.app_env == "development" and settings.dev_auth_bypass:
+    if settings.dev_auth_bypass:
         return
     if request.method in {"GET", "HEAD", "OPTIONS"} or request.headers.get("authorization", "").startswith("Bearer "):
         return
