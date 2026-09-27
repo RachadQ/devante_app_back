@@ -63,7 +63,6 @@ def database_is_available() -> bool:
 async def ensure_indexes(db: AsyncIOMotorDatabase[Any]) -> None:
     await db.users.create_indexes([
         IndexModel([("email", ASCENDING)], unique=True),
-        IndexModel([("microsoft_oid", ASCENDING)], unique=True, sparse=True),
         IndexModel([("is_active", ASCENDING), ("deleted_at", ASCENDING)]),
     ])
     await db.roles.create_indexes([

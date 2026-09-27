@@ -31,9 +31,6 @@ class Settings(BaseSettings):
     auth_cookie_secure: bool = True
     session_cookie_secure: bool = True
     auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
-    microsoft_client_id: str = ""
-    microsoft_client_secret: str = ""
-    microsoft_tenant_id: str = ""
     dev_auth_bypass: bool = False
     dev_auth_email: str = "developer@localhost"
     dev_auth_name: str = "Local Developer"
@@ -101,10 +98,6 @@ class Settings(BaseSettings):
             raise RuntimeError("JWT_SECRET and SESSION_SECRET must be different in production")
         if not self.auth_cookie_secure or not self.session_cookie_secure:
             raise RuntimeError("Secure cookies are required in production")
-        if not self.microsoft_client_id or not self.microsoft_client_secret:
-            raise RuntimeError("Microsoft OAuth credentials are required in production")
-        if self.microsoft_tenant_id.strip().lower() in {"", "common", "organizations", "consumers"}:
-            raise RuntimeError("A tenant-specific Microsoft tenant ID is required in production")
         if self.dev_auth_bypass:
             raise RuntimeError("Development authentication bypass is forbidden in production")
         if not self.origins or "*" in self.origins:

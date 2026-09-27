@@ -4,7 +4,7 @@ FastAPI backend modeled on the reference administration portal, with MongoDB rep
 
 ## Security
 
-- Microsoft Entra ID OAuth with an optional configurable email-domain allowlist
+- Signed cookie sessions and permission checks; external sign-in is not configured yet
 - Short-lived signed JWT sessions in `HttpOnly` cookies
 - CSRF double-submit validation for cookie-authenticated mutations
 - Token revocation on logout, MongoDB TTL cleanup, RBAC/PBAC permission dependencies
@@ -16,16 +16,16 @@ FastAPI backend modeled on the reference administration portal, with MongoDB rep
 
 ```powershell
 Copy-Item .env.example .env
-# Set the Atlas URI, public HTTPS origins, strong secrets, and Microsoft OAuth credentials.
+# Set the Atlas URI, public HTTPS origins, strong secrets.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-local.txt
 python -m uvicorn server:app --host 127.0.0.1 --port 8002
 ```
 
-Production mode fails startup if MongoDB, secure cookie settings, HTTPS origins, strong secrets, or Microsoft OAuth credentials are missing or invalid. API documentation endpoints are disabled.
+Production mode fails startup if MongoDB, secure cookie settings, HTTPS origins, or strong secrets are missing or invalid. API documentation endpoints are disabled.
 
-For localhost development only, `APP_ENV=development` and `DEV_AUTH_BYPASS=true` may be used with loopback-only frontend, CORS, and trusted-host values. This bypasses Microsoft sign-in but never MongoDB. The application rejects public development origins and rejects the bypass whenever `APP_ENV=production`.
+For localhost development only, `APP_ENV=development` and `DEV_AUTH_BYPASS=true` may be used with loopback-only frontend, CORS, and trusted-host values. This enables local development access but never bypasses MongoDB. The application rejects public development origins and rejects the bypass whenever `APP_ENV=production`.
 
 Seed the first administrator after configuring MongoDB:
 
@@ -36,7 +36,7 @@ python scripts/seed_admin.py
 
 MongoDB creates the required collections and indexes during application startup. Use a replica set in production for durability and transactions, TLS-enabled `mongodb+srv://` credentials from a secret manager, network allowlists, encryption at rest, and a least-privilege database user.
 
-Set `ALLOWED_EMAIL_DOMAINS` to a comma-separated list such as `example.com,example.org` to restrict Microsoft sign-in. Leave it empty to accept any email identity verified by the configured Microsoft tenant.
+Microsoft sign-in has been removed. Google sign-in is planned but is not implemented. Until a replacement is configured, new production sign-ins are unavailable; existing valid sessions still use the same authentication and permission checks. Protected API routes return 401 when no valid session is provided.
 
 ## Deploy to Vercel
 
@@ -66,8 +66,7 @@ If logs show `ValidationError` with `input_value=''`, the deployment environment
 variables were saved with empty values. In Vercel project Settings → Environment
 Variables, populate `MONGODB_URI` (including the database name), `JWT_SECRET` and
 `SESSION_SECRET` (different random secrets, each at least 32 characters),
-`FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`, `TRUSTED_HOSTS`, and all three
-`MICROSOFT_*` settings. Use the frontend HTTPS origin for the frontend and CORS
+`FRONTEND_URL`, `CORS_ALLOWED_ORIGINS`, and `TRUSTED_HOSTS`. Use the frontend HTTPS origin for the frontend and CORS
 values, and `devante-app-back.vercel.app` for this backend's trusted host.
 Set these for the deployment's environment, then redeploy. Never paste secrets
 into logs or commit them. Blank optional settings use defaults; secure cookies

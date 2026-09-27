@@ -45,7 +45,7 @@ def user_document(data: UserCreate, actor_id: UUID | None = None) -> dict[str, A
         "is_active": data.is_active,
         "is_super_admin": data.is_super_admin,
         "role_ids": data.role_ids,
-        "auth_provider": "microsoft",
+        "auth_provider": "unconfigured",
         "created_at": now,
         "updated_at": now,
         "created_by": actor_id,
@@ -64,4 +64,3 @@ def serialize(document: dict[str, Any] | None) -> dict[str, Any] | None:
         elif isinstance(value, list):
             result[key] = [str(item) if isinstance(item, UUID) else item for item in value]
     return result
-

@@ -5,7 +5,6 @@ pymongo==4.17.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 PyJWT==2.12.1
-Authlib==1.7.2
 httpx==0.28.1
 curl-cffi==0.16.3
 beautifulsoup4==4.15.0

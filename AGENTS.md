@@ -6,7 +6,7 @@ This FastAPI application serves the Devante React client. It uses MongoDB, signe
 
 - Run locally: `python -m uvicorn server:app --host 127.0.0.1 --port 8002`.
 - Compile check: `python -m compileall -q app`.
-- Tests: `python -m pytest -q`.
+- Temporary tests (when present): `python -m pytest -q`. Remove all test files and test artifacts after verification as described below.
 - Install dependencies: `python -m pip install -r requirements.txt`.
 
 ## API and security
@@ -41,6 +41,8 @@ Document every new setting in `.env.example`. Do not commit a real `.env`, OAuth
 
 ## Cleanup after verification
 
-- After the receipt upload flow is confirmed to work, remove the temporary `test_receipt_upload.py` script.
+- After verification, remove all project-owned test files, including test scripts, automated test suites, test-only fixtures, and test helpers, regardless of their name or location. This includes `test_receipt_upload.py` and files under `tests/`.
+- Remove generated test caches, reports, and empty test directories. Do not remove tests bundled inside installed dependencies or virtual environments.
+- Tests may be created temporarily for verification, but must not remain in the final working tree or be committed unless the user explicitly requests retaining them.
 - Remove sample or seeded receipt records and files created during testing.
 - Never commit real receipt images, OCR output, test credentials, or development-only authentication data.
