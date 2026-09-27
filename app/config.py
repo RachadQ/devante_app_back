@@ -124,10 +124,28 @@ def get_settings() -> Settings:
     try:
         settings = Settings()  # type: ignore[call-arg]
     except ValidationError as exc:
-        fields = sorted({str(error["loc"][0]).upper() for error in exc.errors(include_input=False)})
+        reasons = []
+        for error in exc.errors(include_input=False, include_context=False):
+            field = str(error["loc"][0]).upper()
+            kind = error["type"]
+            if kind == "missing":
+                reason = "not supplied to this deployment or empty"
+            elif kind == "string_too_short":
+                reason = "must contain at least 32 characters" if field in {
+                    "JWT_SECRET", "SESSION_SECRET"
+                } else "value is too short"
+            elif field in {"FRONTEND_URL", "CORS_ALLOWED_ORIGINS"}:
+                reason = "expected HTTP(S) origin with no credentials, path, query, or fragment"
+                if field == "CORS_ALLOWED_ORIGINS":
+                    reason += "; separate multiple origins with commas"
+            elif kind == "bool_parsing":
+                reason = "expected true or false"
+            else:
+                reason = "invalid value (" + kind + ")"
+            reasons.append(field + ": " + reason)
         raise RuntimeError(
-            "Missing or invalid environment variables: " + ", ".join(fields)
-            + ". Set their values in the deployment environment and redeploy."
+            "Deployment configuration failed: " + "; ".join(sorted(reasons))
+            + ". Update this deployment's environment variables and redeploy."
         ) from None
     settings.validate_production()
     return settings
