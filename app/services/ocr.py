@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import sys
 import time
 from datetime import date, datetime
 from io import BytesIO
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 def _get_rapid_engine() -> Any:
     global _rapid_engine
     if _rapid_engine is None:
+        vendor_dir = str(Path(__file__).resolve().parent.parent / "vendor")
+        if vendor_dir not in sys.path:
+            sys.path.insert(0, vendor_dir)
+
         model_dir = Path(gettempdir()) / "rapidocr-models"
         model_dir.mkdir(parents=True, exist_ok=True)
         logger.info("[OCR-STEP] Initializing RapidOCR engine (model_dir=%s)", model_dir)
