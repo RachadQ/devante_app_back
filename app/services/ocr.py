@@ -132,22 +132,29 @@ def _parse_amount(value: str) -> float | None:
 
 
 def suggested_total(text: str) -> float | None:
-    """Find the payable total from labels used by many receipt formats."""
+    """Find the payable total from labels used by many receipt formats or largest sensible transaction value."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     label = re.compile(
-        r"\b(amount\s+due|balance\s+due|grand\s+total|total\s+due|total|montant\s+d[uû]|solde)\b",
+        r"\b(amount\s+due|balance\s+due|grand\s+total|total\s+due|total\s+cad|total\s+usd|total|montant\s+d[uû]|solde|net\s+total)\b",
         re.IGNORECASE,
     )
     for index, line in enumerate(lines):
         match = label.search(line)
-        if not match or re.search(r"\b(subtotal|sous[- ]total)\b", line, re.IGNORECASE):
+        if not match or re.search(r"\b(subtotal|sous[- ]total|tax|hst|gst|qst|tps|tvq|discount|savings)\b", line, re.IGNORECASE):
             continue
-        # Start at the label so prices earlier on a flattened line cannot win.
         nearby = " ".join([line[match.start():], *lines[index + 1:index + 3]])
         for value in _AMOUNT.findall(nearby):
             parsed = _parse_amount(value)
-            if parsed is not None:
+            if parsed is not None and parsed > 0:
                 return parsed
+    
+    # Fallback: Find numbers near 'Total' even if subtotal was in the line
+    for line in reversed(lines):
+        if re.search(r"\btotal\b", line, re.IGNORECASE):
+            amounts = [_parse_amount(val) for val in _AMOUNT.findall(line)]
+            valid = [a for a in amounts if a is not None and a > 0]
+            if valid:
+                return valid[-1]
     return None
 
 
@@ -165,8 +172,6 @@ def suggested_date(text: str) -> date | None:
                 except ValueError:
                     pass
 
-    # Values over 12 disambiguate regional ordering. For an ambiguous date,
-    # month/day is the default because the primary audience is Canadian.
     for match in re.finditer(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})(?!\d)", text):
         first, second, year = (int(part) for part in match.groups())
         year = year + 2000 if year < 100 else year
@@ -190,11 +195,7 @@ def suggested_currency(text: str) -> str | None:
         if match:
             matches.append((match.start(), currency))
     if matches:
-        # Receipts sometimes print a secondary conversion near the bottom. The
-        # first explicit currency normally belongs to the transaction itself.
         return min(matches)[1]
-    # Bare dollar signs are ambiguous. Canadian sales-tax labels provide strong
-    # evidence; otherwise CAD is the configured product default for this audience.
     if re.search(r"\b(GST|HST|QST|TPS|TVQ)\b", upper) or "$" in text:
         return "CAD"
     return None
@@ -203,10 +204,10 @@ def suggested_currency(text: str) -> str | None:
 def suggested_category(text: str) -> str:
     lower = text.lower()
     category_keywords = {
-        "gas": ("gasoline", "petrol", "diesel", "fuel", "pump", "litre", "liter", "unleaded", "essence"),
-        "client_meals": ("restaurant", "cafe", "coffee", "table", "tisch", "latte", "meal", "food", "bar", "server", "served", "gratuity", "tip"),
-        "maintenance": ("repair", "maintenance", "service", "parts", "hardware", "automotive", "garage", "plumbing", "electrical"),
-        "job_expense": ("job", "project", "work order", "site expense", "materials", "lumber", "supplies", "equipment", "tool"),
+        "gas": ("gasoline", "petrol", "diesel", "fuel", "pump", "litre", "liter", "unleaded", "essence", "petro", "shell", "esso", "chevron", "circle k"),
+        "client_meals": ("restaurant", "cafe", "coffee", "table", "tisch", "latte", "meal", "food", "bar", "server", "served", "gratuity", "tip", "tim hortons", "mcdonald", "starbucks", "subway"),
+        "maintenance": ("repair", "maintenance", "service", "parts", "hardware", "automotive", "garage", "plumbing", "electrical", "oil change", "tires"),
+        "job_expense": ("job", "project", "work order", "site expense", "materials", "lumber", "supplies", "equipment", "tool", "home depot", "lowes", "rona", "canadian tire"),
     }
     scores = {category: sum(1 for keyword in keywords if keyword in lower)
               for category, keywords in category_keywords.items()}
@@ -230,18 +231,18 @@ def suggested_vendor(text: str) -> str | None:
     ignored = re.compile(
         r"\b(receipt|invoice|tax invoice|customer copy|merchant copy|order|transaction|"
         r"date|time|cashier|register|terminal|welcome|thank you|merci|total|subtotal|"
-        r"gst|hst|qst|tps|tvq|phone|tel|fax|www\.|https?://)\b",
+        r"gst|hst|qst|tps|tvq|phone|tel|fax|www\.|https?://|store\s*#|trans\s*#|sale)\b",
         re.IGNORECASE,
     )
     postal_or_address = re.compile(
         r"\b\d{1,6}\s+\w+|\b[A-Z]\d[A-Z][ -]?\d[A-Z]\d\b|\b\d{5}(?:-\d{4})?\b",
         re.IGNORECASE,
     )
-    for line in text.splitlines()[:10]:
+    for line in text.splitlines()[:12]:
         clean = line.strip()
         if len(clean) < 2 or re.fullmatch(r"[\d\W]+", clean):
             continue
-        candidate = re.split(r"\s{2,}", clean, maxsplit=1)[0].strip(" -*|:")
+        candidate = re.split(r"\s{2,}", clean, maxsplit=1)[0].strip(" -*|:#")
         if ignored.search(candidate) or postal_or_address.search(candidate):
             continue
         if sum(character.isdigit() for character in candidate) > len(candidate) / 3:
