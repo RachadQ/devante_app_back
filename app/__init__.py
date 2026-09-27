@@ -1,2 +1,2 @@
-"""Internal portal administration API."""
+"""Devante API."""
 

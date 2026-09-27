@@ -1,6 +1,6 @@
-# Internal Portal Administration Backend (MongoDB)
+# Devante Backend (MongoDB)
 
-FastAPI backend modeled on the reference administration portal, with MongoDB replacing PostgreSQL.
+FastAPI backend for Devante, with MongoDB Atlas.
 
 ## Security
 
