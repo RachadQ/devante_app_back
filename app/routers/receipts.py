@@ -554,13 +554,29 @@ async def receipt_summary(year: int | Literal["all"] = date.today().year, job_id
                 "income": None, "expenses": None, "profit_loss": None,
                 "categories": {}, "months": [], "weeks": [], "years": []}
     report_currency = currency or (currencies[0] if currencies else "CAD")
-    expenses = sum(float(i["amount"]) for i in items if i.get("transaction_type") == "expense")
-    income = sum(float(i["amount"]) for i in items if i.get("transaction_type") == "income")
-    categories = {name: sum(float(i["amount"]) for i in items if i.get("transaction_type") == "expense" and i.get("category") == name) for name in sorted(CATEGORIES)}
-    months = [{"month": month, "income": sum(float(i["amount"]) for i in items if i.get("transaction_type") == "income" and i["incurred_at"].month == month), "expenses": sum(float(i["amount"]) for i in items if i.get("transaction_type") == "expense" and i["incurred_at"].month == month)} for month in range(1, 13)]
-    week_numbers = sorted({i["incurred_at"].isocalendar().week for i in items})
-    weeks = [{"week": week, "income": sum(float(i["amount"]) for i in items if i.get("transaction_type") == "income" and i["incurred_at"].isocalendar().week == week), "expenses": sum(float(i["amount"]) for i in items if i.get("transaction_type") == "expense" and i["incurred_at"].isocalendar().week == week)} for week in week_numbers]
-    years = [{"year": value, "income": sum(float(i["amount"]) for i in items if i.get("transaction_type") == "income" and i["incurred_at"].year == value), "expenses": sum(float(i["amount"]) for i in items if i.get("transaction_type") == "expense" and i["incurred_at"].year == value)} for value in sorted({i["incurred_at"].year for i in items})]
+    income = expenses = 0.0
+    categories = {name: 0.0 for name in sorted(CATEGORIES)}
+    month_totals = {value: {"income": 0.0, "expenses": 0.0} for value in range(1, 13)}
+    week_totals: dict[int, dict[str, float]] = {}
+    year_totals: dict[int, dict[str, float]] = {}
+    for item in items:
+        amount = float(item["amount"])
+        bucket = "income" if item.get("transaction_type") == "income" else "expenses"
+        if bucket == "income":
+            income += amount
+        else:
+            expenses += amount
+            category = item.get("category")
+            if category in categories:
+                categories[category] += amount
+        incurred_at = item["incurred_at"]
+        month_totals[incurred_at.month][bucket] += amount
+        week = incurred_at.isocalendar().week
+        week_totals.setdefault(week, {"income": 0.0, "expenses": 0.0})[bucket] += amount
+        year_totals.setdefault(incurred_at.year, {"income": 0.0, "expenses": 0.0})[bucket] += amount
+    months = [{"month": value, **month_totals[value]} for value in range(1, 13)]
+    weeks = [{"week": value, **week_totals[value]} for value in sorted(week_totals)]
+    years = [{"year": value, **year_totals[value]} for value in sorted(year_totals)]
     return {"year": year, "job_id": str(job_id) if job else None,
             "job_code": job["code"] if job else None,
             "currency": report_currency, "currencies": currencies, "mixed_currency": False,

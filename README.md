@@ -19,7 +19,7 @@ Copy-Item .env.example .env
 # Set the Atlas URI, public HTTPS origins, strong secrets, and Microsoft OAuth credentials.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 python -m uvicorn server:app --host 127.0.0.1 --port 8002
 ```
 
@@ -39,6 +39,20 @@ MongoDB creates the required collections and indexes during application startup.
 Set `ALLOWED_EMAIL_DOMAINS` to a comma-separated list such as `example.com,example.org` to restrict Microsoft sign-in. Leave it empty to accept any email identity verified by the configured Microsoft tenant.
 
 ## Receipts, RFI, OCR, and Google Drive
+
+### Deployment size
+
+`requirements.txt` is the smaller serverless install: it includes RapidOCR and
+ONNX Runtime, but excludes PaddlePaddle and PaddleOCR and their large dependency
+tree. Set `OCR_ENGINE=rapid` in the deployment environment. `.vercelignore`
+excludes local virtual environments, model caches, uploads, and development files.
+Redeploy without the previous build cache after changing the dependency set;
+verify the resulting function size in the deployment build output.
+
+Local development and Docker use `requirements-local.txt`, which adds PaddleOCR
+and keeps `OCR_ENGINE=paddle` as the primary engine with RapidOCR as its fallback.
+Installing into an existing environment does not uninstall old dependencies;
+use a fresh environment when measuring the smaller install.
 
 Receipt and RFI image uploads use lightweight PaddleOCR PP-OCRv5 mobile text detection and recognition locally, with RapidOCR as an automatic fallback; no paid OCR service is required. Optional orientation, document-layout, table, formula, seal, and page-unwarping models are not loaded. Documents can be categorized as gas, restaurant/client, maintenance, job expense, or other, and linked to a job, quote, or estimate reference. The reporting endpoint returns weekly, monthly, yearly, category, and profit/loss totals.
 

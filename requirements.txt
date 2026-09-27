@@ -1,5 +1,5 @@
 fastapi==0.136.1
-uvicorn[standard]==0.47.0
+uvicorn==0.47.0
 motor==3.7.1
 pymongo==4.17.0
 pydantic==2.13.4
@@ -15,8 +15,6 @@ itsdangerous==2.2.0
 Pillow==11.3.0
 rapidocr==3.9.2
 onnxruntime==1.30.0
-paddlepaddle==3.2.0
-paddleocr==3.7.0
 google-api-python-client==2.181.0
 google-auth==2.40.3
 cachetools==5.5.2

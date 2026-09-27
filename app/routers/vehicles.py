@@ -1,5 +1,6 @@
 """Vehicle fuel balances calculated from gas receipts and logged trips."""
 
+import asyncio
 import csv
 import re
 from datetime import date, datetime, time, timezone
@@ -25,6 +26,47 @@ CATALOG_URLS = {
 }
 _catalog_cache: dict[str, list[dict]] = {}
 _place_cache: dict[str, list[dict]] = {}
+_external_client: httpx.AsyncClient | None = None
+
+
+def _client() -> httpx.AsyncClient:
+    global _external_client
+    if _external_client is None or _external_client.is_closed:
+        _external_client = httpx.AsyncClient(
+            follow_redirects=False,
+            headers={"User-Agent": "DevanteAdministration/1.0"},
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _external_client
+
+
+async def close_external_client() -> None:
+    global _external_client
+    if _external_client is not None:
+        await _external_client.aclose()
+        _external_client = None
+
+
+def _street_tokens(value: str) -> set[str]:
+    """Return normalized street-name tokens without city, province, or postal code."""
+    value = re.sub(r"\b[a-z]\d[a-z]\s*\d[a-z]\d\b", " ", value.casefold())
+    tokens = re.findall(r"[a-z0-9]+", value)
+    if tokens and tokens[0].isdigit():
+        tokens = tokens[1:]
+    aliases = {"tenth": "10th", "tneth": "10th", "street": "st", "road": "rd",
+               "avenue": "ave", "boulevard": "blvd", "drive": "dr"}
+    suffixes = {"st", "rd", "ave", "blvd", "dr", "line", "lane", "way", "court", "crescent"}
+    directions = {"east", "west", "north", "south", "e", "w", "n", "s"}
+    street = []
+    found_suffix = False
+    for token in tokens:
+        token = aliases.get(token, token)
+        if found_suffix and token not in directions:
+            break
+        street.append(token)
+        if token in suffixes:
+            found_suffix = True
+    return set(street)
 
 
 class VehicleCreate(BaseModel):
@@ -108,9 +150,8 @@ async def _catalog(year: int) -> list[dict]:
     key = str(year) if year >= 2025 else "2015-2024" if year >= 2015 else "1995-2014"
     if key not in _catalog_cache:
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                response = await client.get(CATALOG_URLS[key])
-                response.raise_for_status()
+            response = await _client().get(CATALOG_URLS[key], timeout=30, follow_redirects=True)
+            response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HTTPException(502, "Canadian vehicle ratings are temporarily unavailable") from exc
         rows = csv.DictReader(StringIO(response.content.decode("utf-8-sig", errors="replace").replace("\r\r\n", "\n")))
@@ -142,30 +183,33 @@ async def place_suggestions(q: str, _: dict = Depends(require_permission("RECEIP
     cache_key = query.casefold()
     if cache_key in _place_cache:
         return _place_cache[cache_key]
+    street_number = query.split(maxsplit=1)[0] if query[:1].isdigit() else ""
+    provider_query = re.sub(r"\btneth\b", "Tenth", query, flags=re.IGNORECASE)
+    deadline = asyncio.get_running_loop().time() + 2.8
+    photon_task = asyncio.create_task(_client().get(
+        "https://photon.komoot.io/api/",
+        params={"q": provider_query, "limit": 6, "lang": "en", "bbox": "-141,41,-52,84"},
+        timeout=httpx.Timeout(3.0, connect=1.5),
+    )) if street_number else None
     try:
-        timeout = httpx.Timeout(7.0, connect=3.0)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
-                                     headers={"User-Agent": "DevanteAdministration/1.0"}) as client:
-            response = await client.get("https://geolocator.api.geo.ca/",
-                params={"q": query, "lang": "en", "keys": "locate,fsa"})
-            response.raise_for_status()
-    except httpx.HTTPError:
-        return []
+        timeout = httpx.Timeout(3.0, connect=1.5)
+        response = await asyncio.wait_for(_client().get("https://geolocator.api.geo.ca/",
+            params={"q": provider_query, "lang": "en", "keys": "locate,fsa"}, timeout=timeout),
+            timeout=max(0.1, deadline - asyncio.get_running_loop().time()))
+        response.raise_for_status()
+    except (httpx.HTTPError, TimeoutError):
+        response = None
     suggestions = []
-    for item in response.json()[:8]:
+    for item in response.json()[:8] if response is not None else []:
         label = str(item.get("name") or "").strip()
         if label and item.get("lat") is not None and item.get("lng") is not None:
             suggestions.append({"label": label, "longitude": item["lng"],
                                 "latitude": item["lat"], "provider": "Natural Resources Canada"})
-    street_number = query.split(maxsplit=1)[0] if query[:1].isdigit() else ""
     if street_number and not any(item["label"].startswith(street_number) for item in suggestions):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0),
-                                         follow_redirects=False,
-                                         headers={"User-Agent": "DevanteAdministration/1.0"}) as client:
-                fallback = await client.get("https://photon.komoot.io/api/",
-                    params={"q": query, "limit": 6, "lang": "en", "bbox": "-141,41,-52,84"})
-                fallback.raise_for_status()
+            fallback = await asyncio.wait_for(photon_task,
+                timeout=max(0.1, deadline - asyncio.get_running_loop().time()))
+            fallback.raise_for_status()
             exact = []
             for feature in fallback.json().get("features", []):
                 props = feature.get("properties", {})
@@ -179,15 +223,16 @@ async def place_suggestions(q: str, _: dict = Depends(require_permission("RECEIP
                     exact.append({"label": label, "longitude": coordinates[0],
                                   "latitude": coordinates[1], "provider": "Photon address fallback"})
             if exact:
-                query_tokens = set(re.findall(r"[a-z]+", query.casefold()))
-                street_tokens = query_tokens - set(re.findall(r"[a-z]+", street_number.casefold()))
+                street_tokens = _street_tokens(provider_query)
                 preferred = [item for item in exact
-                             if street_tokens <= set(re.findall(r"[a-z]+", item["label"].casefold()))]
-                ranked = preferred or exact
-                unique = {item["label"]: item for item in reversed(ranked)}
+                             if street_tokens <= _street_tokens(item["label"])]
+                unique = {item["label"]: item for item in reversed(preferred)}
                 suggestions = list(unique.values()) + suggestions
-        except httpx.HTTPError:
+        except (httpx.HTTPError, TimeoutError):
             pass
+    elif photon_task is not None:
+        photon_task.cancel()
+        await asyncio.gather(photon_task, return_exceptions=True)
     if len(_place_cache) >= 250:
         _place_cache.pop(next(iter(_place_cache)))
     _place_cache[cache_key] = suggestions
@@ -197,14 +242,30 @@ async def place_suggestions(q: str, _: dict = Depends(require_permission("RECEIP
 @router.get("")
 async def list_vehicles(_: dict = Depends(require_permission("RECEIPTS_READ"))):
     db = get_database()
+    vehicles = [item async for item in db.vehicles.find({"deleted_at": None}).sort("name", 1)]
+    if not vehicles:
+        return []
+    vehicle_ids = [item["_id"] for item in vehicles]
+    receipt_query = {"deleted_at": None, "document_type": "receipt", "category": "gas",
+                     "vehicle_id": {"$in": vehicle_ids}, "fuel_litres": {"$ne": None}}
+    trip_query = {"deleted_at": None, "vehicle_id": {"$in": vehicle_ids}}
+    receipts, trips = await asyncio.gather(
+        db.receipts.find(receipt_query).to_list(length=None),
+        db.vehicle_trips.find(trip_query).to_list(length=None),
+    )
+    receipts_by_vehicle: dict[UUID, list[dict]] = {vehicle_id: [] for vehicle_id in vehicle_ids}
+    trips_by_vehicle: dict[UUID, list[dict]] = {vehicle_id: [] for vehicle_id in vehicle_ids}
+    for receipt in receipts:
+        receipts_by_vehicle.setdefault(receipt["vehicle_id"], []).append(receipt)
+    for trip in trips:
+        trips_by_vehicle.setdefault(trip["vehicle_id"], []).append(trip)
     result = []
-    async for vehicle in db.vehicles.find({"deleted_at": None}).sort("name", 1):
-        receipts = [item async for item in db.receipts.find({"deleted_at": None, "document_type": "receipt",
-            "category": "gas", "vehicle_id": vehicle["_id"], "fuel_litres": {"$ne": None}})]
-        trips = [item async for item in db.vehicle_trips.find({"deleted_at": None, "vehicle_id": vehicle["_id"]})]
-        result.append({**serialize(vehicle), "fuel": fuel_summary(vehicle, receipts, trips),
-                       "receipt_usage": receipt_usage(vehicle, receipts, trips),
-                       "insurance": insurance_summary(vehicle, trips, date.today().year)})
+    for vehicle in vehicles:
+        vehicle_receipts = receipts_by_vehicle[vehicle["_id"]]
+        vehicle_trips = trips_by_vehicle[vehicle["_id"]]
+        result.append({**serialize(vehicle), "fuel": fuel_summary(vehicle, vehicle_receipts, vehicle_trips),
+                       "receipt_usage": receipt_usage(vehicle, vehicle_receipts, vehicle_trips),
+                       "insurance": insurance_summary(vehicle, vehicle_trips, date.today().year)})
     return result
 
 
@@ -330,8 +391,10 @@ async def route_distance(payload: RouteRequest, _: dict = Depends(require_permis
     headers = {"User-Agent": "DevanteAdministration/1.0 (vehicle trip distance lookup)"}
     try:
         async with httpx.AsyncClient(timeout=15, headers=headers, follow_redirects=False) as client:
-            start = await _geocode(client, payload.start_location.strip())
-            end = await _geocode(client, payload.end_location.strip())
+            start, end = await asyncio.gather(
+                _geocode(client, payload.start_location.strip()),
+                _geocode(client, payload.end_location.strip()),
+            )
             route = await client.get(f"https://router.project-osrm.org/route/v1/driving/{start[0]},{start[1]};{end[0]},{end[1]}",
                                      params={"overview": "false", "alternatives": "false"})
             route.raise_for_status()

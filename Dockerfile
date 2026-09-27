@@ -4,8 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-local.txt ./
+RUN pip install --no-cache-dir -r requirements-local.txt
 COPY . .
 RUN mkdir -p /app/uploads /app/.paddlex && chown -R app:app /app/uploads /app/.paddlex
 USER app

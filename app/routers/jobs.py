@@ -189,18 +189,28 @@ async def create_job_rfi(job_id: UUID, payload: RfiCreate,
 async def get_job(job_id: UUID, actor: dict = Depends(require_permission("JOBS_READ"))):
     job = await _job_or_404(job_id)
     permissions = await user_permissions(actor)
-    documents = []
     can_read_receipts = "*" in permissions or "RECEIPTS_READ" in permissions
-    if can_read_receipts:
-        documents = [serialize(doc) async for doc in get_database().receipts.find({
+    db = get_database()
+    document_cursor = db.receipts.find({
             "deleted_at": None, "link_type": "job", "link_id": {"$in": [job["code"], str(job_id)]},
-        }).sort("incurred_at", -1)]
-    files = [_public_file(file) async for file in get_database().job_files.find({
+        }).sort("incurred_at", -1) if can_read_receipts else None
+    file_cursor = db.job_files.find({
         "job_id": job_id, "deleted_at": None,
-    }).sort("created_at", -1)]
-    quotes = [serialize(quote) async for quote in get_database().quotes.find({
+    }).sort("created_at", -1)
+    quote_cursor = db.quotes.find({
         "job_id": job_id, "deleted_at": None,
-    }).sort("created_at", -1)]
+    }).sort("created_at", -1)
+    if document_cursor is not None:
+        raw_documents, raw_files, raw_quotes = await asyncio.gather(
+            document_cursor.to_list(length=None), file_cursor.to_list(length=None),
+            quote_cursor.to_list(length=None))
+    else:
+        raw_files, raw_quotes = await asyncio.gather(
+            file_cursor.to_list(length=None), quote_cursor.to_list(length=None))
+        raw_documents = []
+    documents = [serialize(item) for item in raw_documents]
+    files = [_public_file(item) for item in raw_files]
+    quotes = [serialize(item) for item in raw_quotes]
     budget_currency = (job.get("budget_currency") or "CAD").upper()
     expense_currencies = {(doc.get("currency") or "CAD").upper() for doc in documents
                           if doc.get("document_type") == "receipt"

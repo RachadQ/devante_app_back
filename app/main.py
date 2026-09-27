@@ -17,7 +17,7 @@ from app.routers.rbac import router as rbac_router
 from app.routers.receipts import router as receipts_router
 from app.routers.jobs import router as jobs_router
 from app.routers.public_rfi import router as public_rfi_router
-from app.routers.vehicles import router as vehicles_router
+from app.routers.vehicles import close_external_client, router as vehicles_router
 from app.security import RateLimiter, csrf_protect
 from app.services.receipt_jobs import start_preview_worker, stop_preview_worker
 
@@ -43,6 +43,7 @@ async def lifespan(_: FastAPI):
     finally:
         if database_connected:
             await stop_preview_worker()
+        await close_external_client()
         await close_database()
 
 

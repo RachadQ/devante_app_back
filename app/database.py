@@ -77,34 +77,42 @@ async def ensure_indexes(db: AsyncIOMotorDatabase[Any]) -> None:
     ])
     await db.revoked_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.receipts.create_indexes([
-        IndexModel([("incurred_at", DESCENDING)]),
-        IndexModel([("document_type", ASCENDING), ("category", ASCENDING), ("incurred_at", DESCENDING)]),
-        IndexModel([("link_type", ASCENDING), ("link_id", ASCENDING)]),
+        IndexModel([("deleted_at", ASCENDING), ("incurred_at", DESCENDING)]),
+        IndexModel([("deleted_at", ASCENDING), ("document_type", ASCENDING), ("category", ASCENDING),
+                    ("incurred_at", DESCENDING)]),
+        IndexModel([("deleted_at", ASCENDING), ("link_type", ASCENDING), ("link_id", ASCENDING),
+                    ("incurred_at", DESCENDING)]),
         IndexModel([("created_by", ASCENDING), ("created_at", DESCENDING)]),
-        IndexModel([("vehicle_id", ASCENDING), ("category", ASCENDING), ("deleted_at", ASCENDING)]),
+        IndexModel([("vehicle_id", ASCENDING), ("deleted_at", ASCENDING), ("document_type", ASCENDING),
+                    ("category", ASCENDING)]),
+        IndexModel([("deleted_at", ASCENDING), ("document_type", ASCENDING), ("incurred_at", DESCENDING),
+                    ("currency", ASCENDING)]),
     ])
     await db.jobs.create_indexes([
         IndexModel([("code", ASCENDING)], unique=True),
         IndexModel([("deleted_at", ASCENDING), ("updated_at", DESCENDING)]),
     ])
     await db.job_files.create_indexes([
-        IndexModel([("job_id", ASCENDING), ("kind", ASCENDING), ("deleted_at", ASCENDING)]),
+        IndexModel([("job_id", ASCENDING), ("deleted_at", ASCENDING), ("created_at", DESCENDING)]),
     ])
     await db.quotes.create_indexes([
         IndexModel([("job_id", ASCENDING), ("deleted_at", ASCENDING), ("created_at", DESCENDING)]),
     ])
     await db.rfi_responses.create_indexes([
-        IndexModel([("rfi_id", ASCENDING), ("responded_at", DESCENDING)]),
+        IndexModel([("rfi_id", ASCENDING), ("deleted_at", ASCENDING), ("responded_at", ASCENDING)]),
     ])
     await db.rfi_attachments.create_indexes([
-        IndexModel([("rfi_id", ASCENDING), ("created_at", DESCENDING)]),
+        IndexModel([("rfi_id", ASCENDING), ("deleted_at", ASCENDING), ("created_at", DESCENDING)]),
     ])
     await db.rfi_share_links.create_indexes([
         IndexModel([("token_hash", ASCENDING)], unique=True),
         IndexModel([("rfi_id", ASCENDING), ("revoked_at", ASCENDING)]),
     ])
-    await db.vehicles.create_index([("deleted_at", ASCENDING), ("name", ASCENDING)])
-    await db.vehicle_trips.create_index([("vehicle_id", ASCENDING), ("occurred_at", DESCENDING), ("deleted_at", ASCENDING)])
+    await db.vehicles.create_indexes([
+        IndexModel([("deleted_at", ASCENDING), ("name", ASCENDING)]),
+        IndexModel([("deleted_at", ASCENDING), ("is_default", ASCENDING)]),
+    ])
+    await db.vehicle_trips.create_index([("vehicle_id", ASCENDING), ("deleted_at", ASCENDING), ("occurred_at", DESCENDING)])
     await db.vehicle_trips.create_index([("deleted_at", ASCENDING), ("start_location", ASCENDING), ("end_location", ASCENDING)])
     # Cleanup must remove both GridFS files and chunks, so application code owns
     # expiration instead of MongoDB's document-only TTL deletion.
