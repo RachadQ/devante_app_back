@@ -15,26 +15,33 @@ from app.config import get_settings
 _rapid_engine: Any = None
 _paddle_engine: Any = None
 _paddle_failed = False
+_rapid_failed = False
 _engine_lock = Lock()
 logger = logging.getLogger(__name__)
 
 
 def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
-    global _rapid_engine
-    if _rapid_engine is None:
-        # Native OCR libraries are only required by OCR requests, not API startup.
-        from rapidocr import RapidOCR
+    global _rapid_engine, _rapid_failed
+    if _rapid_failed:
+        raise RuntimeError("RapidOCR is unavailable")
+    try:
+        if _rapid_engine is None:
+            # Native OCR libraries are only required by OCR requests, not API startup.
+            from rapidocr import RapidOCR
 
-        params = None
-        if os.environ.get("VERCEL") == "1":
-            params = {"Global.model_root_dir": str(Path(gettempdir()) / "rapidocr-models")}
-        _rapid_engine = RapidOCR(params=params)
-    result = _rapid_engine(image)
-    if not result or not result.txts:
-        return "", None
-    lines = [str(line).strip() for line in result.txts if line]
-    scores = [float(score) for score in (result.scores if result.scores is not None else []) if score is not None]
-    return "\n".join(lines), (sum(scores) / len(scores) if scores else None)
+            params = None
+            if os.environ.get("VERCEL") == "1":
+                params = {"Global.model_root_dir": str(Path(gettempdir()) / "rapidocr-models")}
+            _rapid_engine = RapidOCR(params=params)
+        result = _rapid_engine(image)
+        if not result or not result.txts:
+            return "", None
+        lines = [str(line).strip() for line in result.txts if line]
+        scores = [float(score) for score in (result.scores if result.scores is not None else []) if score is not None]
+        return "\n".join(lines), (sum(scores) / len(scores) if scores else None)
+    except Exception:
+        _rapid_failed = True
+        raise
 
 
 def _paddle_payload(result: Any) -> dict[str, Any]:
@@ -106,8 +113,12 @@ def extract_document(content: bytes) -> dict[str, str | float | None]:
                 # Never log OCR text or image contents; only report why the local
                 # high-accuracy engine could not start before using the fallback.
                 logger.warning("PaddleOCR unavailable; using RapidOCR fallback: %s", exc)
-        text, confidence = _extract_with_rapid(image)
-        return {"text": text, "engine": "rapidocr-fallback", "confidence": confidence}
+        try:
+            text, confidence = _extract_with_rapid(image)
+            return {"text": text, "engine": "rapidocr-fallback", "confidence": confidence}
+        except Exception as exc:
+            logger.warning("RapidOCR unavailable: %s", exc)
+            return {"text": "", "engine": "unavailable", "confidence": None}
 
 
 def extract_text(content: bytes) -> str:

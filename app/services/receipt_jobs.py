@@ -66,7 +66,11 @@ async def _process_job(job: dict[str, Any]) -> None:
                 **suggested_fields(text),
                 "ocr_engine": extraction["engine"],
                 "ocr_confidence": extraction["confidence"],
-                "message": None,
+                "message": (
+                    "OCR engine is currently unavailable in this environment; please enter receipt details manually."
+                    if extraction["engine"] == "unavailable"
+                    else None
+                ),
             }
         else:
             result = {
