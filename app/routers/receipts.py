@@ -4,7 +4,7 @@ from contextlib import suppress
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
