@@ -1,4 +1,4 @@
-# Full local/container OCR installation; keep out of serverless builds.
+# Full local OCR installation; keep out of serverless builds.
 -r requirements.txt
 paddlepaddle==3.2.0
 paddleocr==3.7.0

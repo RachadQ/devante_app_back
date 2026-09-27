@@ -16,6 +16,4 @@ test_*.ps1
 .env.*
 requirements-dev.txt
 requirements-local.txt
-Dockerfile
-docker-compose.yml
 *.md

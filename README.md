@@ -49,7 +49,7 @@ excludes local virtual environments, model caches, uploads, and development file
 Redeploy without the previous build cache after changing the dependency set;
 verify the resulting function size in the deployment build output.
 
-Local development and Docker use `requirements-local.txt`, which adds PaddleOCR
+Local development uses `requirements-local.txt`, which adds PaddleOCR
 and keeps `OCR_ENGINE=paddle` as the primary engine with RapidOCR as its fallback.
 Installing into an existing environment does not uninstall old dependencies;
 use a fresh environment when measuring the smaller install.

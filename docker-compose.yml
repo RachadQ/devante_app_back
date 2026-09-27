@@ -1,7 +1,0 @@
-services:
-  api:
-    build: .
-    env_file: .env
-    ports:
-      - "8002:8002"
-    restart: unless-stopped
