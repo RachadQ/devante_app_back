@@ -18,6 +18,21 @@ _worker_task: asyncio.Task[None] | None = None
 _wake_worker = asyncio.Event()
 
 
+async def process_preview_job_by_id(job_id: UUID) -> dict[str, Any] | None:
+    """Claim and immediately process a specific queued job."""
+    db = get_database()
+    job = await db.ocr_preview_jobs.find_one_and_update(
+        {"_id": job_id, "status": "queued"},
+        {"$set": {"status": "processing", "started_at": utcnow(), "updated_at": utcnow()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if job:
+        logger.info("[JOB-STEP] Direct claim for queued job %s in active request context", job_id)
+        await _process_job(job)
+        return await db.ocr_preview_jobs.find_one({"_id": job_id})
+    return None
+
+
 async def enqueue_preview_job(job_id: UUID) -> None:
     _wake_worker.set()
 

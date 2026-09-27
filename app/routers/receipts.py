@@ -21,7 +21,7 @@ from app.models import serialize, utcnow
 from app.security import require_permission
 from app.services.drive import DriveStorage
 from app.services.ocr import extract_text, suggested_total, suggested_vendor
-from app.services.receipt_jobs import enqueue_preview_job
+from app.services.receipt_jobs import enqueue_preview_job, process_preview_job_by_id
 
 router = APIRouter(prefix="/receipts", tags=["receipts"])
 settings = get_settings()
@@ -104,9 +104,14 @@ async def list_receipt_preview_jobs(actor: dict = Depends(require_permission("RE
 async def get_receipt_preview_job(
     job_id: UUID, actor: dict = Depends(require_permission("RECEIPTS_CREATE")),
 ):
-    job = await get_database().ocr_preview_jobs.find_one({"_id": job_id, "created_by": actor["_id"]})
+    db = get_database()
+    job = await db.ocr_preview_jobs.find_one({"_id": job_id, "created_by": actor["_id"]})
     if not job:
         raise HTTPException(404, "Receipt preview job not found or expired")
+    if job["status"] == "queued":
+        processed = await process_preview_job_by_id(job_id)
+        if processed:
+            job = processed
     response: dict = {"job_id": str(job_id), "status": job["status"],
                       "filename": job["filename"], "mime_type": job["mime_type"],
                       "documentType": job.get("document_type", "receipt")}
