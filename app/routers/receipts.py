@@ -648,6 +648,18 @@ async def receipt_summary(year: int | Literal["all"] = date.today().year, job_id
         match.update({"link_type": "job", "link_id": {"$in": [job["code"], str(job_id)]}})
     items = [item async for item in get_database().receipts.find(match)]
     currencies = sorted({(item.get("currency") or "CAD").upper() for item in items})
+    by_currency = {}
+    for c in currencies:
+        c_items = [item for item in items if (item.get("currency") or "CAD").upper() == c]
+        c_inc = sum(float(it["amount"]) for it in c_items if it.get("transaction_type") == "income")
+        c_exp = sum(float(it["amount"]) for it in c_items if it.get("transaction_type") != "income")
+        by_currency[c] = {
+            "income": round(c_inc, 2),
+            "expenses": round(c_exp, 2),
+            "profit_loss": round(c_inc - c_exp, 2),
+            "count": len(c_items),
+        }
+
     if currency is not None:
         currency = currency.upper()
         if not re.fullmatch(r"[A-Z]{3}", currency):
@@ -657,6 +669,7 @@ async def receipt_summary(year: int | Literal["all"] = date.today().year, job_id
         return {"year": year, "job_id": str(job_id) if job else None,
                 "job_code": job["code"] if job else None, "currency": None,
                 "currencies": currencies, "mixed_currency": True,
+                "by_currency": by_currency,
                 "income": None, "expenses": None, "profit_loss": None,
                 "categories": {}, "months": [], "weeks": [], "years": []}
     report_currency = currency or (currencies[0] if currencies else "CAD")
