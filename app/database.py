@@ -124,3 +124,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase[Any]) -> None:
         IndexModel([("created_by", ASCENDING), ("created_at", DESCENDING)]),
         IndexModel([("expires_at", ASCENDING)]),
     ])
+    with suppress(Exception):
+        await db.receipts.update_many({"currency": "CHF"}, {"$set": {"currency": "CAD"}})
+        await db.jobs.update_many({"budget_currency": "CHF"}, {"$set": {"budget_currency": "CAD"}})
+
