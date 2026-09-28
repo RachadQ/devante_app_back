@@ -127,4 +127,11 @@ async def ensure_indexes(db: AsyncIOMotorDatabase[Any]) -> None:
     with suppress(Exception):
         await db.receipts.update_many({"currency": "CHF"}, {"$set": {"currency": "CAD"}})
         await db.jobs.update_many({"budget_currency": "CHF"}, {"$set": {"budget_currency": "CAD"}})
+        rfi_ids_with_responses = await db.rfi_responses.distinct("rfi_id", {"deleted_at": None})
+        if rfi_ids_with_responses:
+            await db.receipts.update_many(
+                {"_id": {"$in": rfi_ids_with_responses}, "document_type": "rfi"},
+                {"$set": {"status": "closed"}}
+            )
+
 

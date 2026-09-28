@@ -420,10 +420,14 @@ async def list_receipts(year: int | None = None, category: str | None = None, do
         query["category"] = category
     if document_type:
         query["document_type"] = document_type
+    db = get_database()
+    rfi_ids_with_responses = set(await db.rfi_responses.distinct("rfi_id", {"deleted_at": None}))
     items = []
-    async for item in get_database().receipts.find(query).sort("incurred_at", -1):
+    async for item in db.receipts.find(query).sort("incurred_at", -1):
         if item.get("currency") in ("CHF", None, ""):
             item["currency"] = "CAD"
+        if item.get("document_type") == "rfi" and (item.get("_id") in rfi_ids_with_responses or item.get("status") == "closed"):
+            item["status"] = "closed"
         items.append(serialize(item))
     return items
 

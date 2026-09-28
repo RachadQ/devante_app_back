@@ -208,8 +208,12 @@ async def get_job(job_id: UUID, actor: dict = Depends(require_permission("JOBS_R
     else:
         raw_files, raw_quotes = await asyncio.gather(
             file_cursor.to_list(length=None), quote_cursor.to_list(length=None))
-        raw_documents = []
-    documents = [serialize(item) for item in raw_documents]
+    rfi_ids_with_responses = set(await db.rfi_responses.distinct("rfi_id", {"deleted_at": None}))
+    documents = []
+    for item in raw_documents:
+        if item.get("document_type") == "rfi" and (item.get("_id") in rfi_ids_with_responses or item.get("status") == "closed"):
+            item["status"] = "closed"
+        documents.append(serialize(item))
     files = [_public_file(item) for item in raw_files]
     quotes = [serialize(item) for item in raw_quotes]
     budget_currency = (job.get("budget_currency") or "CAD").upper()
