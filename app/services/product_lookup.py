@@ -134,12 +134,12 @@ def _fetch_browser_html(url: str) -> tuple[str, str]:
                     response.close()
                     raise HTTPException(422, "Product URL is not an HTML page")
                 chunks, size = [], 0
+                max_bytes = 10_000_000
                 for chunk in response.iter_content():
                     size += len(chunk)
-                    if size > 2_000_000:
-                        response.close()
-                        raise HTTPException(413, "Product page is too large")
                     chunks.append(chunk)
+                    if size >= max_bytes:
+                        break
                 encoding = response.encoding or "utf-8"
                 response.close()
                 return b"".join(chunks).decode(encoding, errors="replace"), current
@@ -160,6 +160,6 @@ async def extract_product_info(url: str) -> dict:
             result["currency"] = "CAD"
         return {**result, "source_url": current}
     except HTTPException as exc:
-        if exc.status_code in {403, 422}:
+        if exc.status_code in {403, 413, 422}:
             return _url_fallback(current)
         raise
