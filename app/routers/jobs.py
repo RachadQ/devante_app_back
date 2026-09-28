@@ -178,6 +178,7 @@ async def create_job_rfi(job_id: UUID, payload: RfiCreate,
                 "rfi_attention_email": payload.rfi_attention_email.strip() or None,
                 "rfi_due_at": datetime.combine(payload.rfi_due_at, time.min, tzinfo=timezone.utc)
                 if payload.rfi_due_at else None,
+                "status": "open", "closed_at": None,
                 "storage_provider": None, "created_by": actor["_id"], "created_at": now,
                 "updated_at": now, "deleted_at": None}
     await get_database().receipts.insert_one(document)

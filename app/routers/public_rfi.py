@@ -136,6 +136,10 @@ async def submit_public_rfi_response(token: str = Header(..., alias="X-RFI-Token
                 "responder_name": name, "responded_at": utcnow(), "created_at": utcnow(),
                 "created_by": None, "share_link_id": link["_id"], "deleted_at": None, **attachment}
     await get_database().rfi_responses.insert_one(response)
+    await get_database().receipts.update_one(
+        {"_id": rfi["_id"], "document_type": "rfi"},
+        {"$set": {"status": "closed", "closed_at": utcnow(), "updated_at": utcnow()}}
+    )
     await write_audit("RFI_EXTERNAL_RESPONSE_ADDED", None, "rfi_response", response["_id"],
                       metadata={"rfi_id": str(rfi["_id"]), "share_link_id": str(link["_id"])})
     return {"success": True}

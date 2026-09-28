@@ -342,6 +342,8 @@ async def upload_receipt(
         "rfi_attention_phone": rfi_attention_phone.strip() if document_type == "rfi" and rfi_attention_phone else None,
         "rfi_attention_email": rfi_attention_email.strip() if document_type == "rfi" and rfi_attention_email else None,
         "rfi_due_at": datetime.combine(rfi_due_at, time.min, tzinfo=timezone.utc) if document_type == "rfi" and rfi_due_at else None,
+        "status": "open" if document_type == "rfi" else None,
+        "closed_at": None,
         "storage_provider": storage_provider, **drive_data, "created_by": actor["_id"], "created_at": now,
         "updated_at": now, "deleted_at": None,
     }
@@ -571,6 +573,10 @@ async def add_rfi_response(
                 "responder_name": responder, "responded_at": datetime.combine(responded_at, time.min, tzinfo=timezone.utc),
                 "created_at": utcnow(), "created_by": actor["_id"], "deleted_at": None, **attachment}
     await get_database().rfi_responses.insert_one(response)
+    await get_database().receipts.update_one(
+        {"_id": rfi_id, "document_type": "rfi"},
+        {"$set": {"status": "closed", "closed_at": utcnow(), "updated_at": utcnow()}}
+    )
     await write_audit("RFI_RESPONSE_ADDED", actor["_id"], "rfi_response", response["_id"],
                       metadata={"rfi_id": str(rfi_id)})
     return _public_rfi_response(response)
