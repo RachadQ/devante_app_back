@@ -327,10 +327,11 @@ async def upload_receipt(
         await asyncio.to_thread(path.write_bytes, content)
         drive_data = {"local_path": str(path)}
     now = utcnow()
+    cleaned_currency = "CAD" if not currency or currency.upper()[:3] == "CHF" else currency.upper()[:3]
     document = {
         "_id": uuid4(), "document_type": document_type, "transaction_type": transaction_type,
         "category": category, "vendor": vendor or detected_vendor, "amount": amount if amount is not None else detected_amount,
-        "currency": currency.upper()[:3], "incurred_at": datetime.combine(incurred_at, time.min, tzinfo=timezone.utc),
+        "currency": cleaned_currency, "incurred_at": datetime.combine(incurred_at, time.min, tzinfo=timezone.utc),
         "filename": filename, "mime_type": file.content_type, "size_bytes": len(content), "ocr_text": ocr_text,
         "link_type": link_type or None, "link_id": link_id or None, "link_label": link_label or None,
         "vehicle_id": vehicle_id, "fuel_litres": fuel_litres,
@@ -419,7 +420,12 @@ async def list_receipts(year: int | None = None, category: str | None = None, do
         query["category"] = category
     if document_type:
         query["document_type"] = document_type
-    return [serialize(item) async for item in get_database().receipts.find(query).sort("incurred_at", -1)]
+    items = []
+    async for item in get_database().receipts.find(query).sort("incurred_at", -1):
+        if item.get("currency") in ("CHF", None, ""):
+            item["currency"] = "CAD"
+        items.append(serialize(item))
+    return items
 
 
 @router.get("/{receipt_id}/file")
@@ -647,32 +653,6 @@ async def receipt_summary(year: int | Literal["all"] = date.today().year, job_id
             raise HTTPException(404, "Job not found")
         match.update({"link_type": "job", "link_id": {"$in": [job["code"], str(job_id)]}})
     items = [item async for item in get_database().receipts.find(match)]
-    currencies = sorted({(item.get("currency") or "CAD").upper() for item in items})
-    by_currency = {}
-    for c in currencies:
-        c_items = [item for item in items if (item.get("currency") or "CAD").upper() == c]
-        c_inc = sum(float(it["amount"]) for it in c_items if it.get("transaction_type") == "income")
-        c_exp = sum(float(it["amount"]) for it in c_items if it.get("transaction_type") != "income")
-        by_currency[c] = {
-            "income": round(c_inc, 2),
-            "expenses": round(c_exp, 2),
-            "profit_loss": round(c_inc - c_exp, 2),
-            "count": len(c_items),
-        }
-
-    if currency is not None:
-        currency = currency.upper()
-        if not re.fullmatch(r"[A-Z]{3}", currency):
-            raise HTTPException(422, "Currency must be a three-letter code")
-        items = [item for item in items if (item.get("currency") or "CAD").upper() == currency]
-    elif len(currencies) > 1:
-        return {"year": year, "job_id": str(job_id) if job else None,
-                "job_code": job["code"] if job else None, "currency": None,
-                "currencies": currencies, "mixed_currency": True,
-                "by_currency": by_currency,
-                "income": None, "expenses": None, "profit_loss": None,
-                "categories": {}, "months": [], "weeks": [], "years": []}
-    report_currency = currency or (currencies[0] if currencies else "CAD")
     income = expenses = 0.0
     categories = {name: 0.0 for name in sorted(CATEGORIES)}
     month_totals = {value: {"income": 0.0, "expenses": 0.0} for value in range(1, 13)}
@@ -698,7 +678,7 @@ async def receipt_summary(year: int | Literal["all"] = date.today().year, job_id
     years = [{"year": value, **year_totals[value]} for value in sorted(year_totals)]
     return {"year": year, "job_id": str(job_id) if job else None,
             "job_code": job["code"] if job else None,
-            "currency": report_currency, "currencies": currencies, "mixed_currency": False,
+            "currency": "CAD", "currencies": ["CAD"], "mixed_currency": False,
             "income": round(income, 2), "expenses": round(expenses, 2),
             "profit_loss": round(income - expenses, 2), "categories": categories,
             "months": months if year != "all" else [], "weeks": weeks if year != "all" else [], "years": years}

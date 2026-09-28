@@ -268,21 +268,15 @@ def suggested_currency(text: str) -> str | None:
     matches: list[tuple[int, str]] = []
     for currency, pattern in (
         ("CAD", r"\bCAD\b|C\$"), ("USD", r"\bUSD\b|US\$"),
-        ("EUR", r"\bEUR\b|€"), ("GBP", r"\bGBP\b|£"), ("CHF", r"\bCHF\b"),
-        ("AUD", r"\bAUD\b|A\$"), ("JPY", r"\bJPY\b|¥"),
     ):
         match = re.search(pattern, upper)
         if match:
             matches.append((match.start(), currency))
     if matches:
-        # Receipts sometimes print a secondary conversion near the bottom. The
-        # first explicit currency normally belongs to the transaction itself.
         return min(matches)[1]
-    # Bare dollar signs are ambiguous. Canadian sales-tax labels provide strong
-    # evidence; otherwise CAD is the configured product default for this audience.
     if re.search(r"\b(GST|HST|QST|TPS|TVQ)\b", upper) or "$" in text:
         return "CAD"
-    return None
+    return "CAD"
 
 
 def _parse_unit_price(clean_text: str) -> float | None:
