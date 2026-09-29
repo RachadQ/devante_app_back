@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -451,18 +451,40 @@ async def upload_job_file(job_id: UUID, kind: str = Form(...), file: UploadFile 
     return _public_file(document)
 
 
+def _resolve_local_file(local_path: str | None) -> Path | None:
+    if not local_path:
+        return None
+    p = Path(local_path)
+    if p.is_file():
+        return p
+    from app.config import BACKEND_ROOT
+    candidate = BACKEND_ROOT / local_path
+    if candidate.is_file():
+        return candidate
+    candidate2 = BACKEND_ROOT / settings.local_upload_directory / p.name
+    if candidate2.is_file():
+        return candidate2
+    return None
+
+
 @router.get("/{job_id}/files/{file_id}")
 async def download_job_file(job_id: UUID, file_id: UUID, _: dict = Depends(require_permission("JOBS_READ"))):
     await _job_or_404(job_id)
     document = await get_database().job_files.find_one({"_id": file_id, "job_id": job_id, "deleted_at": None})
     if document is None:
         raise HTTPException(404, "File not found")
-    if document["storage_provider"] == "google_drive":
-        return {"web_url": document["web_url"]}
-    path = Path(document["local_path"])
-    if not path.is_file():
-        raise HTTPException(404, "File is no longer available")
-    return FileResponse(path, media_type=document["mime_type"], filename=document["filename"])
+    if document.get("storage_provider") == "google_drive" or document.get("web_url"):
+        web_url = document.get("web_url")
+        if web_url:
+            return RedirectResponse(web_url, status_code=307)
+    resolved = _resolve_local_file(document.get("local_path"))
+    if resolved:
+        return FileResponse(resolved, media_type=document.get("mime_type") or "application/octet-stream",
+                            filename=document.get("filename") or "file",
+                            content_disposition_type="inline")
+    if document.get("web_url"):
+        return RedirectResponse(document["web_url"], status_code=307)
+    raise HTTPException(404, "File is no longer available")
 
 
 @router.delete("/{job_id}/files/{file_id}")

@@ -432,6 +432,22 @@ async def list_receipts(year: int | None = None, category: str | None = None, do
     return items
 
 
+def _resolve_local_file(local_path: str | None) -> Path | None:
+    if not local_path:
+        return None
+    p = Path(local_path)
+    if p.is_file():
+        return p
+    from app.config import BACKEND_ROOT
+    candidate = BACKEND_ROOT / local_path
+    if candidate.is_file():
+        return candidate
+    candidate2 = BACKEND_ROOT / settings.local_upload_directory / p.name
+    if candidate2.is_file():
+        return candidate2
+    return None
+
+
 @router.get("/{receipt_id}/file")
 async def download_receipt_file(receipt_id: UUID, _: dict = Depends(require_permission("RECEIPTS_READ"))):
     document = await get_database().receipts.find_one({"_id": receipt_id, "deleted_at": None})
@@ -441,12 +457,11 @@ async def download_receipt_file(receipt_id: UUID, _: dict = Depends(require_perm
         web_url = document.get("web_url")
         if web_url:
             return RedirectResponse(web_url, status_code=307)
-    if document.get("local_path"):
-        path = Path(document["local_path"])
-        if path.is_file():
-            return FileResponse(path, media_type=document.get("mime_type") or "application/octet-stream",
-                                filename=document.get("filename") or "receipt",
-                                content_disposition_type="inline")
+    resolved = _resolve_local_file(document.get("local_path"))
+    if resolved:
+        return FileResponse(resolved, media_type=document.get("mime_type") or "application/octet-stream",
+                            filename=document.get("filename") or "receipt",
+                            content_disposition_type="inline")
     if document.get("web_url"):
         return RedirectResponse(document["web_url"], status_code=307)
     raise HTTPException(404, "Receipt file is no longer available on disk")
@@ -514,13 +529,18 @@ async def download_rfi_attachment(rfi_id: UUID, attachment_id: UUID,
                                                           "deleted_at": None})
     if item is None:
         raise HTTPException(404, "RFI attachment not found")
-    if item["storage_provider"] == "google_drive":
-        return {"web_url": item["web_url"]}
-    path = Path(item["local_path"])
-    if not path.is_file():
-        raise HTTPException(404, "RFI attachment file is no longer available")
-    return FileResponse(path, media_type=item["mime_type"], filename=item["filename"],
-                        content_disposition_type="inline")
+    if item.get("storage_provider") == "google_drive" or item.get("web_url"):
+        web_url = item.get("web_url")
+        if web_url:
+            return RedirectResponse(web_url, status_code=307)
+    resolved = _resolve_local_file(item.get("local_path"))
+    if resolved:
+        return FileResponse(resolved, media_type=item.get("mime_type") or "application/octet-stream",
+                            filename=item.get("filename") or "attachment",
+                            content_disposition_type="inline")
+    if item.get("web_url"):
+        return RedirectResponse(item["web_url"], status_code=307)
+    raise HTTPException(404, "RFI attachment file is no longer available")
 
 
 @router.delete("/{rfi_id}/attachments/{attachment_id}")
@@ -604,13 +624,18 @@ async def download_rfi_response_file(rfi_id: UUID, response_id: UUID,
                                                         "deleted_at": None})
     if item is None or not item.get("filename"):
         raise HTTPException(404, "Response file not found")
-    if item["storage_provider"] == "google_drive":
-        return {"web_url": item["web_url"]}
-    path = Path(item["local_path"])
-    if not path.is_file():
-        raise HTTPException(404, "Response file is no longer available")
-    return FileResponse(path, media_type=item["mime_type"], filename=item["filename"],
-                        content_disposition_type="inline")
+    if item.get("storage_provider") == "google_drive" or item.get("web_url"):
+        web_url = item.get("web_url")
+        if web_url:
+            return RedirectResponse(web_url, status_code=307)
+    resolved = _resolve_local_file(item.get("local_path"))
+    if resolved:
+        return FileResponse(resolved, media_type=item.get("mime_type") or "application/octet-stream",
+                            filename=item.get("filename") or "response",
+                            content_disposition_type="inline")
+    if item.get("web_url"):
+        return RedirectResponse(item["web_url"], status_code=307)
+    raise HTTPException(404, "Response file is no longer available")
 
 
 @router.patch("/{receipt_id}")
