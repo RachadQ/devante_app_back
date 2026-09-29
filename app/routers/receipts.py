@@ -8,7 +8,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
@@ -437,15 +437,19 @@ async def download_receipt_file(receipt_id: UUID, _: dict = Depends(require_perm
     document = await get_database().receipts.find_one({"_id": receipt_id, "deleted_at": None})
     if document is None:
         raise HTTPException(404, "Document not found")
-    if not document.get("mime_type"):
-        raise HTTPException(404, "This RFI has no original file")
-    if document["storage_provider"] == "google_drive":
-        return {"web_url": document["web_url"]}
-    path = Path(document["local_path"])
-    if not path.is_file():
-        raise HTTPException(404, "File is no longer available")
-    return FileResponse(path, media_type=document["mime_type"], filename=document["filename"],
-                        content_disposition_type="inline")
+    if document.get("storage_provider") == "google_drive" or document.get("web_url"):
+        web_url = document.get("web_url")
+        if web_url:
+            return RedirectResponse(web_url, status_code=307)
+    if document.get("local_path"):
+        path = Path(document["local_path"])
+        if path.is_file():
+            return FileResponse(path, media_type=document.get("mime_type") or "application/octet-stream",
+                                filename=document.get("filename") or "receipt",
+                                content_disposition_type="inline")
+    if document.get("web_url"):
+        return RedirectResponse(document["web_url"], status_code=307)
+    raise HTTPException(404, "Receipt file is no longer available on disk")
 
 
 async def _rfi_or_404(rfi_id: UUID) -> dict:
