@@ -189,7 +189,8 @@ def parse_product_html(html: str, url: str = "") -> dict:
         offer = {}
     description_text = ""
     # Product content is more specific than site-wide SEO descriptions.
-    for selector in ('[itemprop="description"]', '#product_description + p',
+    for selector in ('#feature-bullets ul', '#productDescription', '#bookDescription_feature_div',
+                     '[itemprop="description"]', '#product_description + p',
                      '.product.attribute.description .value', '.product-description',
                      '.PDPRichText', '.product-info-main .filter-option .content .prose'):
         tag = soup.select_one(selector)
@@ -197,17 +198,59 @@ def parse_product_html(html: str, url: str = "") -> dict:
             description_text = (tag.get("content") or tag.get_text(" ", strip=True)).strip()
             if description_text:
                 break
-    price_tag = soup.select_one('[itemprop="price"], .price_color, .product-price, .price')
+    
     price_candidates = [offer.get("price"), offer.get("lowPrice"), embedded.get("price"),
                         meta('meta[property="product:price:amount"]', 'meta[itemprop="price"]',
-                             'meta[property="og:price:amount"]'),
-                        (price_tag.get("content") or price_tag.get_text(" ", strip=True) if price_tag else None)]
+                             'meta[property="og:price:amount"]')]
+    
+    price_selectors = (
+        'span.priceToPay .a-offscreen',
+        'span.apexPriceToPay .a-offscreen',
+        '#corePrice_desktop .a-price .a-offscreen',
+        '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
+        '#priceblock_dealprice',
+        '#priceblock_ourprice',
+        '#priceblock_saleprice',
+        '#price_inside_buybox',
+        '.a-price .a-offscreen',
+        '[data-a-color="price"] .a-offscreen',
+        '.a-price-whole',
+        '[itemprop="price"]',
+        '.price_color',
+        '.product-price',
+        '.price-current',
+        '.current-price',
+        '[data-test="product-price"]',
+        '[data-automation="product-price"]',
+        '.hd-price',
+        '.price-format__main-price',
+        '.price',
+    )
+    for sel in price_selectors:
+        tag = soup.select_one(sel)
+        if tag:
+            content = tag.get("content") or tag.get_text(" ", strip=True)
+            if content and _clean_price(content) is not None:
+                price_candidates.append(content)
+                break
+
     raw_price = next((value for value in price_candidates if _clean_price(value) is not None), None)
     name_candidates = [(product or {}).get("name"), embedded.get("name")]
-    # Separate selectors preserve priority; a combined CSS selector uses document order.
-    for selector in ('h1[itemprop="name"]', 'h1.product-title', '[itemtype$="/Product"] [itemprop="name"]'):
-        name_candidates.extend(tag.get("content") or tag.get_text(" ", strip=True)
-                               for tag in soup.select(selector) if _visible_heading(tag))
+    
+    title_selectors = (
+        '#productTitle',
+        'h1#title',
+        'h1.product-title-word-break',
+        '#title_feature_div h1',
+        'h1[itemprop="name"]',
+        'h1.product-title',
+        '[itemtype$="/Product"] [itemprop="name"]',
+    )
+    for selector in title_selectors:
+        for tag in soup.select(selector):
+            if _visible_heading(tag):
+                name_candidates.append(tag.get("content") or tag.get_text(" ", strip=True))
+
     name_candidates.extend([meta('meta[property="og:title"]'), meta('meta[name="twitter:title"]')])
     name_candidates.extend(tag.get_text(" ", strip=True) for tag in soup.select("h1") if _visible_heading(tag))
     name_candidates.append(soup.title.get_text(" ", strip=True) if soup.title else "")
@@ -215,11 +258,23 @@ def parse_product_html(html: str, url: str = "") -> dict:
     description = str((product or {}).get("description") or embedded.get("description") or description_text or
                       meta('meta[name="description"]', 'meta[property="og:description"]')).strip()
     price = _clean_price(raw_price)
+    
+    hostname = (urlparse(url).hostname or "").lower()
     currency = str(offer.get("priceCurrency") or embedded.get("currency") or meta('meta[property="product:price:currency"]',
                                                     'meta[itemprop="priceCurrency"]',
                                                     'meta[property="og:price:currency"]')).upper().strip()
-    if not currency and isinstance(raw_price, str):
-        currency = "GBP" if "£" in raw_price else "EUR" if "€" in raw_price else ""
+    if not currency:
+        if hostname.endswith(".ca") or "amazon.ca" in hostname:
+            currency = "CAD"
+        elif hostname.endswith(".uk") or "amazon.co.uk" in hostname:
+            currency = "GBP"
+        elif any(hostname.endswith(ext) for ext in (".de", ".fr", ".es", ".it", ".nl")):
+            currency = "EUR"
+        elif hostname.endswith(".com") or "amazon.com" in hostname:
+            currency = "USD"
+        elif isinstance(raw_price, str):
+            currency = "GBP" if "£" in raw_price else "EUR" if "€" in raw_price else "CAD" if "$" in raw_price and hostname.endswith(".ca") else "USD" if "$" in raw_price else ""
+
     # A missing name must not discard a description or price recovered elsewhere.
     return {"name": name[:200], "description": BeautifulSoup(description, "html.parser").get_text(" ", strip=True)[:2000],
             "price": price, "currency": currency or None}
@@ -228,7 +283,16 @@ def parse_product_html(html: str, url: str = "") -> dict:
 def _fetch_browser_html(url: str) -> tuple[str, str]:
     """Fetch public HTML with browser TLS headers without launching a browser."""
     current = url.strip()
-    with browser_requests.Session(impersonate="chrome", headers={"Referer": "https://www.google.com/"}) as client:
+    req_headers = {
+        "Referer": "https://www.google.com/",
+        "Accept-Language": "en-CA,en-US;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
+    }
+    with browser_requests.Session(impersonate="chrome", headers=req_headers) as client:
         for _ in range(4):
             current = _public_url(current)
             try:
