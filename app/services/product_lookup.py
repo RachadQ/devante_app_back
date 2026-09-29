@@ -1,6 +1,7 @@
 """Extract a small product summary from public HTML without paid services."""
 
 import asyncio
+import html as html_lib
 import ipaddress
 import json
 import re
@@ -199,43 +200,88 @@ def parse_product_html(html: str, url: str = "") -> dict:
             if description_text:
                 break
     
-    price_candidates = [offer.get("price"), offer.get("lowPrice"), embedded.get("price"),
-                        meta('meta[property="product:price:amount"]', 'meta[itemprop="price"]',
-                             'meta[property="og:price:amount"]')]
-    
-    price_selectors = (
+    # -------------------------------------------------------------
+    # TIER 1: Standard Semantic Metadata (JSON-LD, Microdata, OpenGraph)
+    # -------------------------------------------------------------
+    price_candidates = [
+        offer.get("price"),
+        offer.get("lowPrice"),
+        embedded.get("price"),
+        meta('meta[property="product:price:amount"]', 'meta[itemprop="price"]', 'meta[property="og:price:amount"]'),
+    ]
+
+    # -------------------------------------------------------------
+    # TIER 2: Universal DOM Attribute & Semantic Class Matching
+    # -------------------------------------------------------------
+    # Generic attributes used across e-commerce frameworks (Shopify, WooCommerce, Magento, BigCommerce, etc.)
+    generic_attr_selectors = (
+        '[data-product-price]',
+        '[data-price]',
+        '[data-amount]',
+        '[data-current-price]',
+        '[data-sale-price]',
+        '[data-test*="price" i]',
+        '[data-automation*="price" i]',
+        '[itemprop="price"]',
+    )
+    for sel in generic_attr_selectors:
+        for tag in soup.select(sel):
+            val = tag.get("data-product-price") or tag.get("data-price") or tag.get("data-amount") or tag.get("content") or tag.get_text(" ", strip=True)
+            if val and _clean_price(val) is not None:
+                price_candidates.append(val)
+                break
+
+    # Fuzzy CSS selectors targeting price elements, prioritizing active/current prices
+    fuzzy_price_selectors = (
         'span.priceToPay .a-offscreen',
         'span.apexPriceToPay .a-offscreen',
         '#corePrice_desktop .a-price .a-offscreen',
         '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
-        '#priceblock_dealprice',
-        '#priceblock_ourprice',
-        '#priceblock_saleprice',
-        '#price_inside_buybox',
         '.a-price .a-offscreen',
-        '[data-a-color="price"] .a-offscreen',
         '.a-price-whole',
-        '[itemprop="price"]',
-        '.price_color',
-        '.product-price',
-        '.price-current',
-        '.current-price',
-        '[data-test="product-price"]',
-        '[data-automation="product-price"]',
-        '.hd-price',
-        '.price-format__main-price',
-        '.price',
+        '[class*="price-current" i]',
+        '[class*="current-price" i]',
+        '[class*="sale-price" i]',
+        '[class*="product-price" i]',
+        '[class*="product__price" i]',
+        '[class*="productPrice" i]',
+        '[class*="price_color" i]',
+        '[class*="final-price" i]',
+        '.product-information span span',
+        '.product-details span',
+        '[id*="price" i]:not([id*="old"]):not([id*="was"]):not([id*="strike"])',
+        '[class*="price" i]:not([class*="old"]):not([class*="was"]):not([class*="strike"]):not([class*="original"]):not([class*="compare"]):not([class*="discount"]):not([class*="saving"])',
     )
-    for sel in price_selectors:
-        tag = soup.select_one(sel)
-        if tag:
-            content = tag.get("content") or tag.get_text(" ", strip=True)
-            if content and _clean_price(content) is not None:
-                price_candidates.append(content)
+    for sel in fuzzy_price_selectors:
+        for tag in soup.select(sel):
+            # Ignore struck-through / deleted original prices
+            if tag.name in ('del', 's') or tag.find_parent(('del', 's')):
+                continue
+            txt = tag.get("content") or tag.get_text(" ", strip=True)
+            if txt and _clean_price(txt) is not None:
+                price_candidates.append(txt)
                 break
 
+    # If still no price found, scan text inside product containers for currency patterns (e.g. Rs. 500, $49.99, £20.00, €15.50)
+    if not any(_clean_price(c) is not None for c in price_candidates):
+        for container_sel in ('.product-information', '.product-details', '[class*="product-detail" i]', '[class*="product-info" i]', 'main', 'article'):
+            container = soup.select_one(container_sel)
+            if container:
+                txt = container.get_text(" ", strip=True)
+                match = re.search(r'(?:Rs\.?|CAD|\$|€|£|USD)\s*(\d[\d,]*(?:\.\d{1,2})?)', txt, re.I)
+                if match:
+                    price_candidates.append(match.group(1))
+                    break
+
     raw_price = next((value for value in price_candidates if _clean_price(value) is not None), None)
-    name_candidates = [(product or {}).get("name"), embedded.get("name")]
+
+    # -------------------------------------------------------------
+    # TIER 3: Universal Title & Heading Discovery
+    # -------------------------------------------------------------
+    name_candidates = [
+        (product or {}).get("name"),
+        embedded.get("name"),
+    ]
     
     title_selectors = (
         '#productTitle',
@@ -243,8 +289,15 @@ def parse_product_html(html: str, url: str = "") -> dict:
         'h1.product-title-word-break',
         '#title_feature_div h1',
         'h1[itemprop="name"]',
-        'h1.product-title',
+        'h1[class*="title" i]',
+        'h1[class*="name" i]',
+        '[class*="product-title" i]',
+        '[class*="product__title" i]',
         '[itemtype$="/Product"] [itemprop="name"]',
+        '.product-information h2',
+        '.product-details h2',
+        '[class*="product-info" i] h2',
+        '[class*="product-detail" i] h2',
     )
     for selector in title_selectors:
         for tag in soup.select(selector):
@@ -255,6 +308,28 @@ def parse_product_html(html: str, url: str = "") -> dict:
     name_candidates.extend(tag.get_text(" ", strip=True) for tag in soup.select("h1") if _visible_heading(tag))
     name_candidates.append(soup.title.get_text(" ", strip=True) if soup.title else "")
     name = next((cleaned for value in name_candidates if (cleaned := _clean_name(value))), "")
+
+    # -------------------------------------------------------------
+    # TIER 4: Description & Features Discovery
+    # -------------------------------------------------------------
+    description_text = ""
+    for selector in (
+        '#feature-bullets ul',
+        '#productDescription',
+        '#bookDescription_feature_div',
+        '[itemprop="description"]',
+        '[class*="product-description" i]',
+        '[class*="product__description" i]',
+        '[class*="description" i]',
+        '#product_description + p',
+        '.PDPRichText',
+    ):
+        tag = soup.select_one(selector)
+        if tag:
+            description_text = (tag.get("content") or tag.get_text(" ", strip=True)).strip()
+            if description_text:
+                break
+
     description = str((product or {}).get("description") or embedded.get("description") or description_text or
                       meta('meta[name="description"]', 'meta[property="og:description"]')).strip()
     price = _clean_price(raw_price)
@@ -275,8 +350,9 @@ def parse_product_html(html: str, url: str = "") -> dict:
         elif isinstance(raw_price, str):
             currency = "GBP" if "£" in raw_price else "EUR" if "€" in raw_price else "CAD" if "$" in raw_price and hostname.endswith(".ca") else "USD" if "$" in raw_price else ""
 
+    clean_description = BeautifulSoup(html_lib.unescape(description), "html.parser").get_text(" ", strip=True) if description else ""
     # A missing name must not discard a description or price recovered elsewhere.
-    return {"name": name[:200], "description": BeautifulSoup(description, "html.parser").get_text(" ", strip=True)[:2000],
+    return {"name": name[:200], "description": clean_description[:2000],
             "price": price, "currency": currency or None}
 
 
