@@ -72,7 +72,7 @@ class QuotePayload(BaseModel):
     notes: str = Field(default="", max_length=5000)
     company_name: str | None = Field(default="Direct Connections", max_length=200)
     contact_name: str | None = Field(default="Devante Williams-Morris", max_length=200)
-    tax_number: str | None = Field(default="GST/HST #: 707729422RT0001", max_length=200)
+    tax_number: str | None = Field(default="GST/HST #: 123456789RT0001", max_length=200)
     address_line1: str | None = Field(default="906-2301 Derry Road West", max_length=200)
     address_line2: str | None = Field(default="Mississauga, ON, Canada L5N 2R4", max_length=200)
     contact_phone_email: str | None = Field(default="647-836-9906 · Devantetheelectrician@gmail.com", max_length=200)
@@ -122,7 +122,7 @@ def _quote_fields(payload: QuotePayload) -> dict:
         "notes": payload.notes.strip(),
         "company_name": (payload.company_name or "Direct Connections").strip(),
         "contact_name": (payload.contact_name or "Devante Williams-Morris").strip(),
-        "tax_number": (payload.tax_number or "GST/HST #: 707729422RT0001").strip(),
+        "tax_number": (payload.tax_number or "GST/HST #: 123456789RT0001").strip(),
         "address_line1": (payload.address_line1 or "906-2301 Derry Road West").strip(),
         "address_line2": (payload.address_line2 or "Mississauga, ON, Canada L5N 2R4").strip(),
         "contact_phone_email": (payload.contact_phone_email or "647-836-9906 · Devantetheelectrician@gmail.com").strip(),
