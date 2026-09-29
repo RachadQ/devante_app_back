@@ -118,18 +118,13 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
         company_parts.append(f'<font size="7.5" color="#475569">{safe(contact_phone_email)}</font>')
     company_html = "".join(company_parts)
 
-    currency = str(quote.get("currency") or "CAD").strip().upper()
-    tax_label = str(quote.get("tax_label") or "HST").strip()
-    tax_rate_val = Decimal(str(quote.get("tax_rate", 13.0) if quote.get("tax_rate") is not None else 13.0))
-    tax_rate_str = f"{tax_rate_val:g}%"
-
     meta_parts = [
         f'<b><font size="19" color="#1d4ed8">{safe(doc_type_heading)}</font></b><br/>',
         f'<font size="8" color="#0f172a"><b>{safe(doc_number_label)}:</b> {safe(doc_number_val)}</font><br/>',
         f'<font size="7.5" color="#475569"><b>Ref Job:</b> {safe(job_code)}</font><br/>',
         f'<font size="7.5" color="#475569"><b>Date:</b> {safe(date_str)}</font><br/>',
         f'<font size="7.5" color="#475569"><b>PO #:</b> {safe(job_code)}</font><br/>',
-        f'<font size="7.5" color="#475569"><b>Currency:</b> {safe(currency)}</font>',
+        f'<font size="7.5" color="#475569"><b>Currency:</b> CAD</font>',
     ]
     meta_html = "".join(meta_parts)
 
@@ -279,26 +274,27 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     story.append(Spacer(1, 6))
 
     # -------------------------------------------------------------
-    # 4. TOTALS & SUMMARY BLOCK (Subtotal, Tax, Total Due)
+    # 4. TOTALS & SUMMARY BLOCK (Subtotal, HST 13%, Total Due)
     # -------------------------------------------------------------
     if "total" in quote and quote["total"] is not None:
         calc_subtotal = Decimal(str(quote["total"]))
     else:
         calc_subtotal = subtotal_val
 
-    tax_amount = (calc_subtotal * (tax_rate_val / Decimal("100"))).quantize(Decimal("0.01"))
-    total_due = calc_subtotal + tax_amount
+    hst_rate = Decimal("0.13")
+    hst_amount = (calc_subtotal * hst_rate).quantize(Decimal("0.01"))
+    total_due = calc_subtotal + hst_amount
 
     summary_rows = [
         [
             "",
             Paragraph("Subtotal", right_style),
-            Paragraph(f"{money(calc_subtotal)} {safe(currency)}", right_bold),
+            Paragraph(f"{money(calc_subtotal)} CAD", right_bold),
         ],
         [
             "",
-            Paragraph(f"{safe(tax_label)} ({tax_rate_str})", right_style),
-            Paragraph(f"{money(tax_amount)} {safe(currency)}", right_bold),
+            Paragraph("HST (13%)", right_style),
+            Paragraph(f"{money(hst_amount)} CAD", right_bold),
         ],
     ]
 
@@ -317,7 +313,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     total_bar_data = [
         [
             Paragraph('<b><font size="10" color="#0f172a">TOTAL DUE (incl. tax)</font></b>', body_style),
-            Paragraph(f'<b><font size="13" color="#1d4ed8">{money(total_due)} {safe(currency)}</font></b>', right_style),
+            Paragraph(f'<b><font size="13" color="#1d4ed8">{money(total_due)} CAD</font></b>', right_style),
         ]
     ]
     total_bar = Table(total_bar_data, colWidths=[266, 266])
@@ -336,7 +332,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     # -------------------------------------------------------------
     footer_text = (
         f"Converted from {doc_type_heading.title()} {doc_number_val} for Job {safe(job_code)}. "
-        f"Subtotal {money(calc_subtotal)} + {safe(tax_label)} {tax_rate_str} {money(tax_amount)} = {safe(currency)} {money(total_due)} total due. "
+        f"Subtotal {money(calc_subtotal)} + HST 13% {money(hst_amount)} = CAD {money(total_due)} total due. "
         "Thank you for your business."
     )
     story.append(Spacer(1, 10))
@@ -355,7 +351,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
         canvas.line(40, 24, 572, 24)
         canvas.setFont("QuoteRegular", 7.5)
         canvas.setFillColor(muted_text)
-        canvas.drawString(40, 14, f"{company_title} · {doc_number_val} · All amounts in {currency}")
+        canvas.drawString(40, 14, f"Direct Connections · {doc_number_val} · All amounts in CAD")
         canvas.drawRightString(572, 14, f"Page {document.page}")
         canvas.restoreState()
 

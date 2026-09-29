@@ -85,6 +85,9 @@ class QuotePayload(BaseModel):
     client_company: str | None = Field(default="", max_length=200)
     payment_terms: str | None = Field(default="Due on receipt", max_length=200)
     payment_reference: str | None = Field(default="", max_length=500)
+    tax_label: str | None = Field(default="HST", max_length=50)
+    tax_rate: float | None = Field(default=13.0, ge=0, le=100, allow_inf_nan=False)
+    currency: str | None = Field(default="CAD", max_length=10)
     items: list[QuoteItem] = Field(min_length=1, max_length=500)
 
 
@@ -109,6 +112,11 @@ def _quote_fields(payload: QuotePayload) -> dict:
                       "source_url": item.source_url.strip(),
                       "quantity": item.quantity, "unit_price": float(price),
                       "line_total": float(line_total)})
+    tax_label = (payload.tax_label or "HST").strip()
+    tax_rate = float(payload.tax_rate) if payload.tax_rate is not None else 13.0
+    tax_amount = (total * (Decimal(str(tax_rate)) / Decimal("100"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    total_due = (total + tax_amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    currency = (payload.currency or "CAD").strip().upper()
     return {
         "title": payload.title.strip(),
         "notes": payload.notes.strip(),
@@ -127,9 +135,14 @@ def _quote_fields(payload: QuotePayload) -> dict:
         "client_company": payload.client_company.strip() if payload.client_company else "",
         "payment_terms": (payload.payment_terms or "Due on receipt").strip(),
         "payment_reference": payload.payment_reference.strip() if payload.payment_reference else "",
-        "items": items,
+        "tax_label": tax_label,
+        "tax_rate": tax_rate,
+        "tax_amount": float(tax_amount),
+        "subtotal": float(total.quantize(Decimal("0.01"))),
         "total": float(total.quantize(Decimal("0.01"))),
-        "currency": "CAD",
+        "total_due": float(total_due),
+        "items": items,
+        "currency": currency,
     }
 
 
