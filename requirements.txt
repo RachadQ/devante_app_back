@@ -8,6 +8,7 @@ PyJWT==2.12.1
 httpx==0.28.1
 curl-cffi==0.16.3
 beautifulsoup4==4.15.0
+reportlab==5.0.1
 python-multipart==0.0.29
 email-validator==2.3.0
 itsdangerous==2.2.0

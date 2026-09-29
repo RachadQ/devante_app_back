@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -21,6 +21,7 @@ from app.security import require_permission, user_permissions
 from app.services.drive import DriveStorage
 from app.services.currency import rates_for
 from app.services.product_lookup import extract_product_info
+from app.services.quote_pdf import render_quote_pdf
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 settings = get_settings()
@@ -68,7 +69,7 @@ class QuoteItem(BaseModel):
 class QuotePayload(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     notes: str = Field(default="", max_length=5000)
-    items: list[QuoteItem] = Field(min_length=1)
+    items: list[QuoteItem] = Field(min_length=1, max_length=500)
 
 
 class ProductLookupRequest(BaseModel):
@@ -107,6 +108,22 @@ def _public_file(document: dict) -> dict:
     item = serialize(document)
     item.pop("local_path", None)
     return item
+
+
+def _public_quote(document: dict) -> dict:
+    item = serialize({key: value for key, value in document.items() if key != "pdf_content"})
+    item["pdf_url"] = f"/jobs/{document['job_id']}/quotes/{document['_id']}/pdf"
+    return item
+
+
+async def _quote_pdf_fields(quote: dict, job: dict) -> dict:
+    content = await asyncio.to_thread(render_quote_pdf, quote, job)
+    # Keep the PDF plus quote data comfortably below MongoDB's document limit.
+    if len(content) > 8_000_000:
+        raise HTTPException(413, "Quote PDF is too large; split this quote into smaller quotes")
+    title = re.sub(r"[^A-Za-z0-9._-]", "_", quote["title"])[:80].strip("._") or "quote"
+    return {"pdf_content": content, "pdf_filename": f"{title}-{str(quote['_id'])[:8]}.pdf",
+            "pdf_generated_at": quote["updated_at"]}
 
 
 def _budget_summary(job: dict, documents: list[dict], can_read_receipts: bool,
@@ -200,7 +217,8 @@ async def get_job(job_id: UUID, actor: dict = Depends(require_permission("JOBS_R
     }).sort("created_at", -1)
     quote_cursor = db.quotes.find({
         "job_id": job_id, "deleted_at": None,
-    }).sort("created_at", -1)
+    }, {"pdf_content": 0}).sort("created_at", -1)
+    raw_documents = []
     if document_cursor is not None:
         raw_documents, raw_files, raw_quotes = await asyncio.gather(
             document_cursor.to_list(length=None), file_cursor.to_list(length=None),
@@ -215,7 +233,7 @@ async def get_job(job_id: UUID, actor: dict = Depends(require_permission("JOBS_R
             item["status"] = "closed"
         documents.append(serialize(item))
     files = [_public_file(item) for item in raw_files]
-    quotes = [serialize(item) for item in raw_quotes]
+    quotes = [_public_quote(item) for item in raw_quotes]
     budget_currency = (job.get("budget_currency") or "CAD").upper()
     expense_currencies = {(doc.get("currency") or "CAD").upper() for doc in documents
                           if doc.get("document_type") == "receipt"
@@ -232,15 +250,16 @@ async def get_job(job_id: UUID, actor: dict = Depends(require_permission("JOBS_R
 @router.post("/{job_id}/quotes", status_code=201)
 async def create_quote(job_id: UUID, payload: QuotePayload,
                        actor: dict = Depends(require_permission("JOBS_UPDATE"))):
-    await _job_or_404(job_id)
+    job = await _job_or_404(job_id)
     now = utcnow()
     quote = {"_id": uuid4(), "job_id": job_id, "kind": "quote", "record_type": "structured_quote",
              **_quote_fields(payload), "created_by": actor["_id"], "created_at": now,
              "updated_at": now, "deleted_at": None}
+    quote.update(await _quote_pdf_fields(quote, job))
     await get_database().quotes.insert_one(quote)
     await write_audit("QUOTE_CREATED", actor["_id"], "quote", quote["_id"],
                       metadata={"job_id": str(job_id)})
-    return serialize(quote)
+    return _public_quote(quote)
 
 
 @router.post("/{job_id}/quotes/extract-item")
@@ -253,8 +272,13 @@ async def extract_quote_item(job_id: UUID, payload: ProductLookupRequest,
 @router.patch("/{job_id}/quotes/{quote_id}")
 async def update_quote(job_id: UUID, quote_id: UUID, payload: QuotePayload,
                        actor: dict = Depends(require_permission("JOBS_UPDATE"))):
-    await _job_or_404(job_id)
+    job = await _job_or_404(job_id)
+    existing = await get_database().quotes.find_one(
+        {"_id": quote_id, "job_id": job_id, "deleted_at": None}, {"pdf_content": 0})
+    if existing is None:
+        raise HTTPException(404, "Quote not found")
     changes = {**_quote_fields(payload), "updated_at": utcnow()}
+    changes.update(await _quote_pdf_fields({**existing, **changes}, job))
     quote = await get_database().quotes.find_one_and_update(
         {"_id": quote_id, "job_id": job_id, "deleted_at": None}, {"$set": changes},
         return_document=ReturnDocument.AFTER)
@@ -262,7 +286,24 @@ async def update_quote(job_id: UUID, quote_id: UUID, payload: QuotePayload,
         raise HTTPException(404, "Quote not found")
     await write_audit("QUOTE_UPDATED", actor["_id"], "quote", quote_id,
                       metadata={"job_id": str(job_id)})
-    return serialize(quote)
+    return _public_quote(quote)
+
+
+@router.get("/{job_id}/quotes/{quote_id}/pdf")
+async def download_quote_pdf(job_id: UUID, quote_id: UUID,
+                             actor: dict = Depends(require_permission("JOBS_READ"))):
+    job = await _job_or_404(job_id)
+    quote = await get_database().quotes.find_one(
+        {"_id": quote_id, "job_id": job_id, "deleted_at": None})
+    if quote is None:
+        raise HTTPException(404, "Quote not found")
+    # Older quotes remain downloadable without a data migration.
+    pdf = quote if quote.get("pdf_content") else await _quote_pdf_fields(quote, job)
+    await write_audit("QUOTE_PDF_DOWNLOADED", actor["_id"], "quote", quote_id,
+                      metadata={"job_id": str(job_id)})
+    return Response(content=pdf["pdf_content"], media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{pdf["pdf_filename"]}"',
+                             "Cache-Control": "private, no-store"})
 
 
 @router.delete("/{job_id}/quotes/{quote_id}")
