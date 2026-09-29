@@ -20,6 +20,7 @@ from app.models import serialize, utcnow
 from app.security import require_permission, user_permissions
 from app.services.drive import DriveStorage
 from app.services.currency import rates_for
+from app.services.ocr import extract_document, suggested_total, suggested_vendor
 from app.services.product_lookup import extract_product_info
 from app.services.quote_pdf import render_quote_pdf
 
@@ -69,6 +70,21 @@ class QuoteItem(BaseModel):
 class QuotePayload(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     notes: str = Field(default="", max_length=5000)
+    company_name: str | None = Field(default="Direct Connections", max_length=200)
+    contact_name: str | None = Field(default="Devante Williams-Morris", max_length=200)
+    tax_number: str | None = Field(default="GST/HST #: 707729422RT0001", max_length=200)
+    address_line1: str | None = Field(default="906-2301 Derry Road West", max_length=200)
+    address_line2: str | None = Field(default="Mississauga, ON, Canada L5N 2R4", max_length=200)
+    contact_phone_email: str | None = Field(default="647-836-9906 · Devantetheelectrician@gmail.com", max_length=200)
+    doc_type: str | None = Field(default="QUOTE", max_length=50)
+    quote_number: str | None = Field(default="", max_length=100)
+    po_number: str | None = Field(default="", max_length=100)
+    quote_date: str | None = Field(default="", max_length=100)
+    client_name: str | None = Field(default="", max_length=200)
+    client_email: str | None = Field(default="", max_length=200)
+    client_company: str | None = Field(default="", max_length=200)
+    payment_terms: str | None = Field(default="Due on receipt", max_length=200)
+    payment_reference: str | None = Field(default="", max_length=500)
     items: list[QuoteItem] = Field(min_length=1, max_length=500)
 
 
@@ -93,8 +109,28 @@ def _quote_fields(payload: QuotePayload) -> dict:
                       "source_url": item.source_url.strip(),
                       "quantity": item.quantity, "unit_price": float(price),
                       "line_total": float(line_total)})
-    return {"title": payload.title.strip(), "notes": payload.notes.strip(),
-            "items": items, "total": float(total.quantize(Decimal("0.01"))), "currency": "CAD"}
+    return {
+        "title": payload.title.strip(),
+        "notes": payload.notes.strip(),
+        "company_name": (payload.company_name or "Direct Connections").strip(),
+        "contact_name": (payload.contact_name or "Devante Williams-Morris").strip(),
+        "tax_number": (payload.tax_number or "GST/HST #: 707729422RT0001").strip(),
+        "address_line1": (payload.address_line1 or "906-2301 Derry Road West").strip(),
+        "address_line2": (payload.address_line2 or "Mississauga, ON, Canada L5N 2R4").strip(),
+        "contact_phone_email": (payload.contact_phone_email or "647-836-9906 · Devantetheelectrician@gmail.com").strip(),
+        "doc_type": (payload.doc_type or "QUOTE").strip().upper(),
+        "quote_number": payload.quote_number.strip() if payload.quote_number else "",
+        "po_number": payload.po_number.strip() if payload.po_number else "",
+        "quote_date": payload.quote_date.strip() if payload.quote_date else "",
+        "client_name": payload.client_name.strip() if payload.client_name else "",
+        "client_email": payload.client_email.strip() if payload.client_email else "",
+        "client_company": payload.client_company.strip() if payload.client_company else "",
+        "payment_terms": (payload.payment_terms or "Due on receipt").strip(),
+        "payment_reference": payload.payment_reference.strip() if payload.payment_reference else "",
+        "items": items,
+        "total": float(total.quantize(Decimal("0.01"))),
+        "currency": "CAD",
+    }
 
 
 async def _job_or_404(job_id: UUID) -> dict:
@@ -267,6 +303,30 @@ async def extract_quote_item(job_id: UUID, payload: ProductLookupRequest,
                              _: dict = Depends(require_permission("JOBS_UPDATE"))):
     await _job_or_404(job_id)
     return await extract_product_info(payload.url)
+
+
+@router.post("/{job_id}/quotes/extract-receipt")
+async def extract_receipt_for_quote(job_id: UUID, file: UploadFile = File(...),
+                                    _: dict = Depends(require_permission("JOBS_UPDATE"))):
+    await _job_or_404(job_id)
+    if file.content_type not in FILE_TYPES:
+        raise HTTPException(415, "Upload a PDF, JPEG, PNG, or WebP receipt")
+    content = await file.read(settings.max_upload_bytes + 1)
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(413, "File exceeds upload limit")
+    extracted = await asyncio.to_thread(extract_document, content)
+    ocr_text = str(extracted.get("text", "")).strip()
+    vendor = suggested_vendor(ocr_text) if ocr_text else ""
+    total = suggested_total(ocr_text) if ocr_text else None
+    clean_lines = [l.strip() for l in ocr_text.splitlines() if l.strip()]
+    summary_desc = "\n".join(clean_lines[:3]) if clean_lines else "Scanned receipt expense"
+    return {
+        "name": vendor or Path(file.filename or "Receipt").stem,
+        "description": summary_desc,
+        "unit_price": float(total) if total is not None else 0.0,
+        "quantity": 1,
+        "ocr_text": ocr_text,
+    }
 
 
 @router.patch("/{job_id}/quotes/{quote_id}")

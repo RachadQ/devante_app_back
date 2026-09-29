@@ -60,21 +60,30 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     # References and dates
     quote_id = str(quote.get("_id", ""))
     ref_num = quote_id[:8].upper() if len(quote_id) > 8 else (quote_id.upper() or "001")
-    job_code = str(job.get("code", "")).strip() or "JOB"
-    job_name = str(job.get("name", "")).strip() or "Client Project"
-    company_name = str(job.get("company", "")).strip()
+    job_code = str(quote.get("po_number") or job.get("code", "")).strip() or "JOB"
+    job_name = str(quote.get("client_name") or job.get("name", "")).strip() or "Client Project"
+    job_company_name = str(job.get("company", "")).strip()
     
     updated = quote.get("updated_at") or quote.get("created_at")
-    if isinstance(updated, datetime):
+    if quote.get("quote_date"):
+        date_str = str(quote.get("quote_date")).strip()
+    elif isinstance(updated, datetime):
         date_str = updated.strftime("%B %d, %Y")
     else:
         date_str = datetime.now().strftime("%B %d, %Y")
 
     doc_title = str(quote.get("title", "")).strip()
-    is_invoice = "invoice" in doc_title.lower()
-    doc_type_heading = "INVOICE" if is_invoice else "QUOTE"
-    doc_number_label = "Invoice #" if is_invoice else "Quote #"
-    doc_number_val = f"INV{ref_num}" if is_invoice else f"QTE-{ref_num}"
+    is_invoice = "invoice" in doc_title.lower() or quote.get("doc_type") == "INVOICE"
+    doc_type_heading = str(quote.get("doc_type") or ("INVOICE" if is_invoice else "QUOTE")).strip().upper()
+    doc_number_label = "Invoice #" if doc_type_heading == "INVOICE" else "Quote #"
+    doc_number_val = str(quote.get("quote_number") or (f"INV{ref_num}" if is_invoice else f"QTE-{ref_num}")).strip()
+
+    company_title = str(quote.get("company_name") or "Direct Connections").strip()
+    contact_name = str(quote.get("contact_name") or "Devante Williams-Morris").strip()
+    tax_number = str(quote.get("tax_number") or "GST/HST #: 707729422RT0001").strip()
+    address_line1 = str(quote.get("address_line1") or "906-2301 Derry Road West").strip()
+    address_line2 = str(quote.get("address_line2") or "Mississauga, ON, Canada L5N 2R4").strip()
+    contact_phone_email = str(quote.get("contact_phone_email") or "647-836-9906 · Devantetheelectrician@gmail.com").strip()
 
     # Printable width = 612 - 80 = 532pt
     doc = SimpleDocTemplate(
@@ -85,7 +94,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
         topMargin=32,
         bottomMargin=36,
         title=f"{doc_type_heading} {doc_number_val} - {job_name}",
-        author="Direct Connections",
+        author=company_title,
         pageCompression=1,
     )
 
@@ -94,23 +103,35 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     # -------------------------------------------------------------
     # 1. HEADER BLOCK (Company on Left, Document Metadata on Right)
     # -------------------------------------------------------------
-    company_html = (
-        '<b><font size="14" color="#0f172a">Direct Connections</font></b><br/>'
-        '<font size="8.5" color="#334155">Devante Williams-Morris</font><br/>'
-        '<font size="7.5" color="#475569">GST/HST #: 707729422RT0001</font><br/>'
-        '<font size="7.5" color="#475569">906-2301 Derry Road West</font><br/>'
-        '<font size="7.5" color="#475569">Mississauga, ON, Canada L5N 2R4</font><br/>'
-        '<font size="7.5" color="#475569">647-836-9906 · Devantetheelectrician@gmail.com</font>'
-    )
+    company_parts = []
+    if company_title:
+        company_parts.append(f'<b><font size="14" color="#0f172a">{safe(company_title)}</font></b><br/>')
+    if contact_name:
+        company_parts.append(f'<font size="8.5" color="#334155">{safe(contact_name)}</font><br/>')
+    if tax_number:
+        company_parts.append(f'<font size="7.5" color="#475569">{safe(tax_number)}</font><br/>')
+    if address_line1:
+        company_parts.append(f'<font size="7.5" color="#475569">{safe(address_line1)}</font><br/>')
+    if address_line2:
+        company_parts.append(f'<font size="7.5" color="#475569">{safe(address_line2)}</font><br/>')
+    if contact_phone_email:
+        company_parts.append(f'<font size="7.5" color="#475569">{safe(contact_phone_email)}</font>')
+    company_html = "".join(company_parts)
 
-    meta_html = (
-        f'<b><font size="19" color="#1d4ed8">{doc_type_heading}</font></b><br/>'
-        f'<font size="8" color="#0f172a"><b>{doc_number_label}:</b> {doc_number_val}</font><br/>'
-        f'<font size="7.5" color="#475569"><b>Ref estimate:</b> EST{ref_num}</font><br/>'
-        f'<font size="7.5" color="#475569"><b>Date:</b> {date_str}</font><br/>'
-        f'<font size="7.5" color="#475569"><b>PO #:</b> {safe(job_code)}</font><br/>'
-        f'<font size="7.5" color="#475569"><b>Currency:</b> CAD</font>'
-    )
+    currency = str(quote.get("currency") or "CAD").strip().upper()
+    tax_label = str(quote.get("tax_label") or "HST").strip()
+    tax_rate_val = Decimal(str(quote.get("tax_rate", 13.0) if quote.get("tax_rate") is not None else 13.0))
+    tax_rate_str = f"{tax_rate_val:g}%"
+
+    meta_parts = [
+        f'<b><font size="19" color="#1d4ed8">{safe(doc_type_heading)}</font></b><br/>',
+        f'<font size="8" color="#0f172a"><b>{safe(doc_number_label)}:</b> {safe(doc_number_val)}</font><br/>',
+        f'<font size="7.5" color="#475569"><b>Ref Job:</b> {safe(job_code)}</font><br/>',
+        f'<font size="7.5" color="#475569"><b>Date:</b> {safe(date_str)}</font><br/>',
+        f'<font size="7.5" color="#475569"><b>PO #:</b> {safe(job_code)}</font><br/>',
+        f'<font size="7.5" color="#475569"><b>Currency:</b> {safe(currency)}</font>',
+    ]
+    meta_html = "".join(meta_parts)
 
     header_table = Table(
         [
@@ -141,19 +162,27 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     # -------------------------------------------------------------
     # 2. BILL TO & PAYMENT BLOCK
     # -------------------------------------------------------------
+    client_email = str(quote.get("client_email", "")).strip()
+    client_company = str(quote.get("client_company") or job_company_name).strip()
+    payment_terms = str(quote.get("payment_terms") or "Due on receipt").strip()
+    default_payment_ref = f"Please reference {doc_number_val} / PO {job_code}"
+    payment_ref = str(quote.get("payment_reference") or default_payment_ref).strip()
+
     bill_to_parts = [
         '<font size="7.5" color="#64748b"><b>BILL TO</b></font><br/>',
         f'<b><font size="9" color="#0f172a">{safe(job_name)}</font></b><br/>',
     ]
-    if company_name:
-        bill_to_parts.append(f'<font size="8" color="#334155">{safe(company_name)}</font><br/>')
+    if client_email:
+        bill_to_parts.append(f'<font size="7.5" color="#475569">{safe(client_email)}</font><br/>')
+    if client_company:
+        bill_to_parts.append(f'<font size="8" color="#334155">{safe(client_company)}</font><br/>')
     if job.get("description"):
         bill_to_parts.append(f'<font size="7.5" color="#64748b">{safe(job.get("description"))}</font>')
 
     payment_html = (
         '<font size="7.5" color="#64748b"><b>PAYMENT</b></font><br/>'
-        '<font size="8.5" color="#0f172a">Due on receipt</font><br/>'
-        f'<font size="7.5" color="#64748b">Please reference {doc_number_val} / PO {safe(job_code)}</font>'
+        f'<b><font size="8.5" color="#0f172a">{safe(payment_terms)}</font></b><br/>'
+        f'<font size="7.5" color="#64748b">{safe(payment_ref)}</font>'
     )
 
     info_table = Table(
@@ -250,27 +279,26 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     story.append(Spacer(1, 6))
 
     # -------------------------------------------------------------
-    # 4. TOTALS & SUMMARY BLOCK (Subtotal, HST 13%, Total Due)
+    # 4. TOTALS & SUMMARY BLOCK (Subtotal, Tax, Total Due)
     # -------------------------------------------------------------
     if "total" in quote and quote["total"] is not None:
         calc_subtotal = Decimal(str(quote["total"]))
     else:
         calc_subtotal = subtotal_val
 
-    hst_rate = Decimal("0.13")
-    hst_amount = (calc_subtotal * hst_rate).quantize(Decimal("0.01"))
-    total_due = calc_subtotal + hst_amount
+    tax_amount = (calc_subtotal * (tax_rate_val / Decimal("100"))).quantize(Decimal("0.01"))
+    total_due = calc_subtotal + tax_amount
 
     summary_rows = [
         [
             "",
             Paragraph("Subtotal", right_style),
-            Paragraph(f"{money(calc_subtotal)} CAD", right_bold),
+            Paragraph(f"{money(calc_subtotal)} {safe(currency)}", right_bold),
         ],
         [
             "",
-            Paragraph("HST (13%)", right_style),
-            Paragraph(f"{money(hst_amount)} CAD", right_bold),
+            Paragraph(f"{safe(tax_label)} ({tax_rate_str})", right_style),
+            Paragraph(f"{money(tax_amount)} {safe(currency)}", right_bold),
         ],
     ]
 
@@ -289,7 +317,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     total_bar_data = [
         [
             Paragraph('<b><font size="10" color="#0f172a">TOTAL DUE (incl. tax)</font></b>', body_style),
-            Paragraph(f'<b><font size="13" color="#1d4ed8">{money(total_due)} CAD</font></b>', right_style),
+            Paragraph(f'<b><font size="13" color="#1d4ed8">{money(total_due)} {safe(currency)}</font></b>', right_style),
         ]
     ]
     total_bar = Table(total_bar_data, colWidths=[266, 266])
@@ -308,7 +336,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
     # -------------------------------------------------------------
     footer_text = (
         f"Converted from {doc_type_heading.title()} {doc_number_val} for Job {safe(job_code)}. "
-        f"Subtotal {money(calc_subtotal)} + HST 13% {money(hst_amount)} = CAD {money(total_due)} total due. "
+        f"Subtotal {money(calc_subtotal)} + {safe(tax_label)} {tax_rate_str} {money(tax_amount)} = {safe(currency)} {money(total_due)} total due. "
         "Thank you for your business."
     )
     story.append(Spacer(1, 10))
@@ -327,7 +355,7 @@ def render_quote_pdf(quote: dict, job: dict) -> bytes:
         canvas.line(40, 24, 572, 24)
         canvas.setFont("QuoteRegular", 7.5)
         canvas.setFillColor(muted_text)
-        canvas.drawString(40, 14, f"Direct Connections · {doc_number_val} · All amounts in CAD")
+        canvas.drawString(40, 14, f"{company_title} · {doc_number_val} · All amounts in {currency}")
         canvas.drawRightString(572, 14, f"Page {document.page}")
         canvas.restoreState()
 
