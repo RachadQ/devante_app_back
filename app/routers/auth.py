@@ -2,6 +2,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.audit import write_audit
 from app.config import get_settings
@@ -14,6 +18,52 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 settings = get_settings()
 
 
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(min_length=1, max_length=8192)
+
+
+@router.get("/google/config")
+async def google_config():
+    return {"client_id": settings.google_oauth_client_id}
+
+
+@router.post("/google")
+async def google_login(payload: GoogleLoginRequest, request: Request, response: Response):
+    if not settings.google_oauth_client_id:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
+    if request.headers.get("origin") != settings.frontend_url:
+        raise HTTPException(status_code=403, detail="Sign-in request origin is not allowed")
+
+    try:
+        claims = await run_in_threadpool(
+            id_token.verify_oauth2_token,
+            payload.credential,
+            GoogleRequest(),
+            settings.google_oauth_client_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google credential") from exc
+    email = claims.get("email", "").strip().lower()
+    if not email or claims.get("email_verified") is not True:
+        raise HTTPException(status_code=401, detail="Google account email is not verified")
+
+    db = get_database()
+    user = await db.users.find_one({"email": email, "is_active": True, "deleted_at": None})
+    if not user:
+        raise HTTPException(status_code=403, detail="This Google account is not enabled in the administration portal")
+
+    now = utcnow()
+    await db.users.update_one({"_id": user["_id"]}, {"$set": {"last_login_at": now}})
+    token, _ = create_access_token(user["_id"], bool(user.get("is_super_admin")))
+    set_auth_cookies(response, token)
+    await write_audit("LOGIN", user["_id"], "session", metadata={"provider": "google"})
+    await db.login_activity_logs.insert_one({
+        "user_id": user["_id"], "provider": "google", "created_at": now,
+    })
+    clean = {key: value for key, value in user.items() if key != "token_payload"}
+    return {"success": True, "user": serialize(clean), "permissions": sorted(await user_permissions(user))}
+
+
 @router.get("/bootstrap")
 async def bootstrap(user: dict = Depends(get_current_user)):
     permissions = await user_permissions(user)
@@ -23,8 +73,6 @@ async def bootstrap(user: dict = Depends(get_current_user)):
 
 @router.post("/heartbeat")
 async def heartbeat(response: Response, user: dict = Depends(get_current_user)):
-    if settings.dev_auth_bypass:
-        return {"status": "ok", "mode": "localhost_development"}
     await get_database().users.update_one({"_id": user["_id"]}, {"$set": {"last_activity_at": utcnow()}})
     token, _ = create_access_token(user["_id"], bool(user.get("is_super_admin")))
     set_auth_cookies(response, token)
@@ -33,11 +81,6 @@ async def heartbeat(response: Response, user: dict = Depends(get_current_user)):
 
 @router.post("/logout")
 async def logout(request: Request, user: dict = Depends(get_current_user)):
-    if settings.dev_auth_bypass:
-        response = JSONResponse({"status": "success"})
-        clear_auth_cookies(response)
-        request.session.clear()
-        return response
     response = JSONResponse({"status": "success"})
     clear_auth_cookies(response)
     request.session.clear()

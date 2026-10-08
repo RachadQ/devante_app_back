@@ -4,7 +4,7 @@ FastAPI backend for Devante, with MongoDB Atlas.
 
 ## Security
 
-- Signed cookie sessions and permission checks; external sign-in is not configured yet
+- Google sign-in verifies Google ID tokens and only admits active users provisioned in the administration portal
 - Short-lived signed JWT sessions in `HttpOnly` cookies
 - CSRF double-submit validation for cookie-authenticated mutations
 - Token revocation on logout, MongoDB TTL cleanup, RBAC/PBAC permission dependencies
@@ -23,9 +23,9 @@ pip install -r requirements-local.txt
 python -m uvicorn server:app --host 127.0.0.1 --port 8002
 ```
 
-Production mode fails startup if MongoDB, secure cookie settings, HTTPS origins, or strong secrets are missing or invalid. API documentation endpoints are disabled.
+Production mode fails startup if MongoDB, Google OAuth, secure cross-site cookie settings, matching HTTPS frontend/CORS origins, or strong secrets are missing or invalid. API documentation endpoints are disabled.
 
-For localhost development only, `APP_ENV=development` and `DEV_AUTH_BYPASS=true` may be used with loopback-only frontend, CORS, and trusted-host values. This enables local development access but never bypasses MongoDB. The application rejects public development origins and rejects the bypass whenever `APP_ENV=production`.
+Local development uses the same Google sign-in and administration-portal user allowlist as production. Configure a Google OAuth web client ID and use loopback-only frontend, CORS, and trusted-host values; there is no developer-account bypass.
 
 Seed the first administrator after configuring MongoDB:
 
@@ -36,7 +36,7 @@ python scripts/seed_admin.py
 
 MongoDB creates the required collections and indexes during application startup. Use a replica set in production for durability and transactions, TLS-enabled `mongodb+srv://` credentials from a secret manager, network allowlists, encryption at rest, and a least-privilege database user.
 
-Microsoft sign-in has been removed. Google sign-in is planned but is not implemented. Until a replacement is configured, new production sign-ins are unavailable; existing valid sessions still use the same authentication and permission checks. Protected API routes return 401 when no valid session is provided.
+Configure `GOOGLE_OAUTH_CLIENT_ID` with the OAuth web client ID used by the frontend's Google Identity Services sign-in button. Add the frontend's exact HTTPS origin to that client's Authorized JavaScript origins. The frontend posts the returned ID token as JSON `{ "credential": "..." }` to `POST /auth/google` from the configured `FRONTEND_URL`. The backend verifies the token audience and verified email, then matches that email to an active, non-deleted user created in the administration portal. It never creates users during sign-in. Successful requests receive the normal HttpOnly session cookies; unlisted, inactive, and deleted users are denied.
 
 ## Deploy to Vercel
 
@@ -58,7 +58,14 @@ Leave build/install overrides at their framework defaults. Do not configure a
 Uvicorn start command or run the local virtual-environment commands during
 deployment. Configure the production environment variables from `.env.example`
 in Vercel, with `OCR_ENGINE=rapid` and the actual frontend/backend origins and
-hostnames. Redeploy without the build cache after dependency changes.
+hostnames. Since the frontend and API use separate Vercel hostnames, set
+`AUTH_COOKIE_SAMESITE=none` and keep both secure-cookie settings `true`. Set
+`GOOGLE_OAUTH_CLIENT_ID`, and include the exact `FRONTEND_URL` in
+`CORS_ALLOWED_ORIGINS`. In the frontend Vercel project, set the build-time
+`VITE_API_URL` to the backend HTTPS origin (for example,
+`https://devante-app-back.vercel.app`). Add the frontend HTTPS origin to the
+Google OAuth client's Authorized JavaScript origins. Redeploy both projects
+after changing environment variables.
 
 See the [Vercel FastAPI documentation](https://vercel.com/docs/frameworks/backend/fastapi).
 
@@ -70,8 +77,8 @@ Variables, populate `MONGODB_URI` (including the database name), `JWT_SECRET` an
 values, and `devante-app-back.vercel.app` for this backend's trusted host.
 Set these for the deployment's environment, then redeploy. Never paste secrets
 into logs or commit them. Blank optional settings use defaults; secure cookies
-default to `true` and SameSite defaults to `lax`. Required settings still fail
-closed when missing.
+default to `true` and SameSite defaults to `none` for the cross-site deployment.
+Required authentication settings fail closed when missing.
 
 ## Receipts, RFI, OCR, and Google Drive
 

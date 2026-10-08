@@ -46,16 +46,6 @@ async def get_current_user(
     access_token: Annotated[str | None, Cookie(alias=AUTH_COOKIE_NAME)] = None,
 ) -> dict:
     settings = get_settings()
-    if settings.dev_auth_bypass:
-        return {
-            "_id": UUID("00000000-0000-4000-8000-000000000001"),
-            "email": settings.dev_auth_email.lower().strip(),
-            "full_name": settings.dev_auth_name.strip(),
-            "is_active": True, "is_super_admin": True, "role_ids": [],
-            "auth_provider": "localhost_development", "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc), "deleted_at": None,
-            "token_payload": {"jti": "localhost-development", "exp": 0},
-        }
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else access_token
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
@@ -97,10 +87,8 @@ def require_permission(permission: str) -> Callable:
 
 async def csrf_protect(request: Request) -> None:
     settings = get_settings()
-    # Public RFI submissions use an unguessable link token and no cookie session.
-    if request.method == "POST" and request.url.path == "/public/rfi/responses":
-        return
-    if settings.dev_auth_bypass:
+    # These endpoints authenticate independently of the application's cookie session.
+    if request.method == "POST" and request.url.path in {"/public/rfi/responses", "/auth/google"}:
         return
     if request.method in {"GET", "HEAD", "OPTIONS"} or request.headers.get("authorization", "").startswith("Bearer "):
         return

@@ -1,70 +1,33 @@
 import logging
-import os
 import re
-import sys
-import time
 from datetime import date, datetime
 from io import BytesIO
-from pathlib import Path
-from tempfile import gettempdir
 from threading import Lock
 from typing import Any
 
+import numpy as np
 from PIL import Image, ImageOps
+from rapidocr import RapidOCR
 
 from app.config import get_settings
 
-_rapid_engine: Any = None
+_rapid_engine: RapidOCR | None = None
 _paddle_engine: Any = None
 _paddle_failed = False
 _engine_lock = Lock()
 logger = logging.getLogger(__name__)
 
 
-def _get_rapid_engine() -> Any:
+def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
     global _rapid_engine
     if _rapid_engine is None:
-        vendor_dir = str(Path(__file__).resolve().parent.parent / "vendor")
-        if vendor_dir not in sys.path:
-            sys.path.insert(0, vendor_dir)
-
-        model_dir = Path(gettempdir()) / "rapidocr-models"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("[OCR-STEP] Initializing RapidOCR engine (model_dir=%s)", model_dir)
-        try:
-            # Native OCR libraries are only required by OCR requests, not API startup.
-            from rapidocr import RapidOCR
-
-            params = {"Global.model_root_dir": str(model_dir)}
-            _rapid_engine = RapidOCR(params=params)
-            logger.info("[OCR-STEP] RapidOCR engine initialized successfully")
-        except Exception as exc:
-            logger.exception("[OCR-STEP] RapidOCR engine initialization failed: %s", exc)
-            raise
-    return _rapid_engine
-
-
-def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
-    start = time.perf_counter()
-    logger.info("[OCR-STEP] Running RapidOCR inference (image size=%sx%s)", image.size[0], image.size[1])
-    try:
-        engine = _get_rapid_engine()
-        result = engine(image)
-        elapsed = time.perf_counter() - start
-        if not result or not result.txts:
-            logger.info("[OCR-STEP] RapidOCR finished in %.2fs: no text detected", elapsed)
-            return "", None
-        lines = [str(line).strip() for line in result.txts if line]
-        scores = [float(score) for score in (result.scores if result.scores is not None else []) if score is not None]
-        avg_score = (sum(scores) / len(scores)) if scores else None
-        logger.info(
-            "[OCR-STEP] RapidOCR finished in %.2fs: %d text blocks extracted, avg confidence: %s",
-            elapsed, len(lines), f"{avg_score:.2f}" if avg_score is not None else "None"
-        )
-        return "\n".join(lines), avg_score
-    except Exception as exc:
-        logger.exception("[OCR-STEP] RapidOCR inference failed: %s", exc)
-        raise
+        _rapid_engine = RapidOCR()
+    result = _rapid_engine(image)
+    if not result or not result.txts:
+        return "", None
+    lines = [str(line).strip() for line in result.txts if line]
+    scores = [float(score) for score in (result.scores or []) if score is not None]
+    return "\n".join(lines), (sum(scores) / len(scores) if scores else None)
 
 
 def _paddle_payload(result: Any) -> dict[str, Any]:
@@ -79,34 +42,23 @@ def _paddle_payload(result: Any) -> dict[str, Any]:
 def _get_paddle_engine() -> Any:
     global _paddle_engine
     if _paddle_engine is None:
-        logger.info("[OCR-STEP] Initializing PaddleOCR engine")
-        try:
-            from paddleocr import PaddleOCR
-            _paddle_engine = PaddleOCR(
-                text_detection_model_name="PP-OCRv5_mobile_det",
-                text_recognition_model_name="PP-OCRv5_mobile_rec",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-            )
-            logger.info("[OCR-STEP] PaddleOCR engine initialized successfully")
-        except Exception as exc:
-            logger.exception("[OCR-STEP] PaddleOCR engine initialization failed: %s", exc)
-            raise
+        from paddleocr import PaddleOCR
+        _paddle_engine = PaddleOCR(
+            text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="PP-OCRv5_mobile_rec",
+            use_doc_orientation_classify=True,
+            use_doc_unwarping=False,
+            use_textline_orientation=True,
+        )
     return _paddle_engine
 
 
 def _extract_with_paddle(image: Image.Image) -> tuple[str, float | None]:
-    import numpy as np
-
     global _paddle_failed
     if _paddle_failed:
         raise RuntimeError("PaddleOCR is unavailable")
-    start = time.perf_counter()
-    logger.info("[OCR-STEP] Running PaddleOCR inference (image size=%sx%s)", image.size[0], image.size[1])
     try:
         output = _get_paddle_engine().predict(np.asarray(image))
-        elapsed = time.perf_counter() - start
         lines: list[str] = []
         scores: list[float] = []
         for item in output:
@@ -118,81 +70,35 @@ def _extract_with_paddle(image: Image.Image) -> tuple[str, float | None]:
             if not lines:
                 lines.extend(str(value).strip() for value in overall.get("rec_texts", []) if value)
             scores.extend(float(value) for value in overall.get("rec_scores", []) if value is not None)
-        avg_score = (sum(scores) / len(scores)) if scores else None
-        logger.info(
-            "[OCR-STEP] PaddleOCR finished in %.2fs: %d text blocks extracted, avg confidence: %s",
-            elapsed, len(lines), f"{avg_score:.2f}" if avg_score is not None else "None"
-        )
-        return "\n".join(line for line in lines if line), avg_score
-    except Exception as exc:
+        return "\n".join(line for line in lines if line), (sum(scores) / len(scores) if scores else None)
+    except Exception:
         _paddle_failed = True
-        logger.exception("[OCR-STEP] PaddleOCR inference failed: %s", exc)
         raise
 
 
 def warm_ocr_engine() -> None:
     """Load OCR models before the first receipt without retaining document data."""
-    settings = get_settings()
-    logger.info("[OCR-STEP] warm_ocr_engine invoked (configured engine: %s)", settings.ocr_engine)
+    if get_settings().ocr_engine != "paddle":
+        return
     with _engine_lock:
-        if settings.ocr_engine == "paddle":
-            try:
-                _get_paddle_engine()
-                logger.info("[OCR-STEP] PaddleOCR engine warm-up complete")
-            except Exception as exc:
-                logger.warning("[OCR-STEP] PaddleOCR warm-up failed: %s", exc)
-        elif settings.ocr_engine == "rapid":
-            try:
-                _get_rapid_engine()
-                logger.info("[OCR-STEP] RapidOCR engine warm-up complete")
-            except Exception as exc:
-                logger.warning("[OCR-STEP] RapidOCR warm-up failed: %s", exc)
+        _get_paddle_engine()
 
 
 def extract_document(content: bytes) -> dict[str, str | float | None]:
-    start = time.perf_counter()
-    logger.info("[OCR-STEP] extract_document called (content size=%d bytes)", len(content))
     image = ImageOps.exif_transpose(Image.open(BytesIO(content))).convert("RGB")
-
-    # Downscale high-resolution phone camera images (e.g. 4000x3000 -> max 1800px)
-    # Preserves 100% receipt text clarity while speeding up ONNX inference by 4x-8x.
-    max_dim = 1800
-    if max(image.size) > max_dim:
-        ratio = max_dim / max(image.size)
-        new_size = (int(image.size[0] * ratio), int(image.size[1] * ratio))
-        image = image.resize(new_size, Image.Resampling.BILINEAR)
-        logger.info("[OCR-STEP] Downscaled image for rapid inference to %sx%s", image.size[0], image.size[1])
-
     settings = get_settings()
     with _engine_lock:
         if settings.ocr_engine == "paddle":
             try:
                 text, confidence = _extract_with_paddle(image)
                 if text:
-                    elapsed = time.perf_counter() - start
-                    logger.info(
-                        "[OCR-STEP] extract_document completed via paddle in %.2fs (confidence: %s, text length: %d)",
-                        elapsed, f"{confidence:.2f}" if confidence is not None else "None", len(text)
-                    )
                     return {"text": text, "engine": "paddle-ppocrv5-mobile", "confidence": confidence}
             except Exception as exc:
                 # Never log OCR text or image contents; only report why the local
                 # high-accuracy engine could not start before using the fallback.
-                logger.warning("[OCR-STEP] PaddleOCR unavailable; using RapidOCR fallback: %s", exc)
-        try:
-            text, confidence = _extract_with_rapid(image)
-            elapsed = time.perf_counter() - start
-            logger.info(
-                "[OCR-STEP] extract_document completed via rapidocr in %.2fs (confidence: %s, text length: %d)",
-                elapsed, f"{confidence:.2f}" if confidence is not None else "None", len(text)
-            )
-            return {"text": text, "engine": "rapidocr-fallback", "confidence": confidence}
-        except Exception as exc:
-            elapsed = time.perf_counter() - start
-            logger.warning("[OCR-STEP] RapidOCR unavailable in %.2fs: %s", elapsed, exc)
-            return {"text": "", "engine": "unavailable", "confidence": None}
-
-
+                logger.warning("PaddleOCR unavailable; using RapidOCR fallback: %s", exc)
+        text, confidence = _extract_with_rapid(image)
+        return {"text": text, "engine": "rapidocr-fallback", "confidence": confidence}
 
 
 def extract_text(content: bytes) -> str:
@@ -268,89 +174,27 @@ def suggested_currency(text: str) -> str | None:
     matches: list[tuple[int, str]] = []
     for currency, pattern in (
         ("CAD", r"\bCAD\b|C\$"), ("USD", r"\bUSD\b|US\$"),
+        ("EUR", r"\bEUR\b|€"), ("GBP", r"\bGBP\b|£"), ("CHF", r"\bCHF\b"),
+        ("AUD", r"\bAUD\b|A\$"), ("JPY", r"\bJPY\b|¥"),
     ):
         match = re.search(pattern, upper)
         if match:
             matches.append((match.start(), currency))
     if matches:
+        # Receipts sometimes print a secondary conversion near the bottom. The
+        # first explicit currency normally belongs to the transaction itself.
         return min(matches)[1]
+    # Bare dollar signs are ambiguous. Canadian sales-tax labels provide strong
+    # evidence; otherwise CAD is the configured product default for this audience.
     if re.search(r"\b(GST|HST|QST|TPS|TVQ)\b", upper) or "$" in text:
         return "CAD"
-    return "CAD"
-
-
-def _parse_unit_price(clean_text: str) -> float | None:
-    """Find price per litre on Canadian fuel receipts ($/L or cents/L)."""
-    patterns = [
-        r"(?:price|prix|rate|tarif)[\s\/]*(?:l|litre|liter)?\s*[:#]?\s*[\$]?\s*([0-9]{1,2}\.[0-9]{2,4})\b",
-        r"[\$]?\s*([0-9]{1,2}\.[0-9]{2,4})\s*[\$]?\s*\/\s*(?:l|lt|litre|liter)\b",
-        r"[\$]?\s*([0-9]{1,2}\.[0-9]{2,4})\s*[\$]?\s*(?:\s+par\s+|\s+per\s+)(?:l|lt|litre|liter)\b",
-        r"(?:@|à|a|at)\s*[\$]?\s*([0-9]{1,2}\.[0-9]{2,4})",
-        r"([0-9]{2,3}\.[0-9])\s*(?:¢|c|cents?)\s*\/\s*l\b",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, clean_text, re.IGNORECASE)
-        if match:
-            try:
-                val = float(match.group(1))
-                if val > 50.0:  # Cents per litre: e.g. 159.9 c/L -> 1.599 $/L
-                    val /= 100.0
-                if 0.5 <= val <= 4.0:
-                    return val
-            except ValueError:
-                continue
-    return None
-
-
-def suggested_litres(text: str, total: float | None = None) -> float | None:
-    """Extract fuel volume in litres from Canadian gas receipt formats."""
-    clean_text = text.replace(",", ".")
-
-    # Priority 1: Explicit labels with volume/litres/quantity
-    label_patterns = [
-        # VOLUME: 45.210 L or VOL (L): 45.210 or LITRES: 55.120 or QTE: 40.500 L
-        r"(?:volume|vol|litres?|liters?|quantit[eé]|qt[eé]|qty)\s*(?:\([^\)]*\))?\s*[:#]?\s*([0-9]{1,4}(?:\.[0-9]{1,3})?)\s*(?:l|lt|ltr|litres?|liters?)?\b",
-        # 42.500 L @ $1.659 / L or 42.500L @ 1.659 $/L
-        r"([0-9]{1,4}\.[0-9]{2,3})\s*(?:l|lt|ltr|litres?|liters?)\s*(?:@|à|a|at)\s*[\$]?[0-9]",
-        # REGULAR 42.500 L or ESSENCE 45.210 L or DIESEL 85.000 L
-        r"(?:regular|regulier|r[eé]gulier|unleaded|sans plomb|diesel|supreme|extra|plus|v-power|midgrade|super)\s*[:#]?\s*([0-9]{1,4}\.[0-9]{2,3})\s*(?:l|lt|ltr|litres?|liters?)?\b",
-        # 3-decimal standalone volume with L unit (Measurement Canada standard display) e.g. 45.125 L
-        r"(?<![\$\d\/])([0-9]{1,3}\.[0-9]{3})\s*(?:l|lt|ltr|litres?|liters?)\b(?![\/])",
-        # 2-decimal standalone volume with explicit L unit e.g. 45.12 L
-        r"(?<![\$\d\/])([0-9]{1,3}\.[0-9]{2})\s*(?:l|lt|ltr|litres?|liters?)\b(?![\/])",
-    ]
-
-    for pattern in label_patterns:
-        for match in re.finditer(pattern, clean_text, re.IGNORECASE):
-            val_str = match.group(1)
-            try:
-                val = float(val_str)
-                # Filter out pump numbers, small quantities, or invalid floats (valid fuel range: 1.0L to 1500.0L)
-                if 1.0 <= val <= 1500.0:
-                    return round(val, 3)
-            except ValueError:
-                continue
-
-    # Priority 2: Calculate from Total and Unit Price if Unit Price is detected
-    if total is not None and total > 0:
-        unit_price = _parse_unit_price(clean_text)
-        if unit_price and 0.5 <= unit_price <= 4.0:
-            calculated = total / unit_price
-            if 1.0 <= calculated <= 1500.0:
-                return round(calculated, 3)
-
     return None
 
 
 def suggested_category(text: str) -> str:
     lower = text.lower()
     category_keywords = {
-        "gas": (
-            "gasoline", "petrol", "diesel", "fuel", "pump", "pompe", "litre", "litres",
-            "liter", "liters", "unleaded", "essence", "sans plomb", "carburant",
-            "petro-canada", "petro canada", "shell", "esso", "couche-tard", "ultramar",
-            "pioneer", "husky", "irving", "chevron", "canadian tire gas", "costco gas"
-        ),
+        "gas": ("gasoline", "petrol", "diesel", "fuel", "pump", "litre", "liter", "unleaded", "essence"),
         "client_meals": ("restaurant", "cafe", "coffee", "table", "tisch", "latte", "meal", "food", "bar", "server", "served", "gratuity", "tip"),
         "maintenance": ("repair", "maintenance", "service", "parts", "hardware", "automotive", "garage", "plumbing", "electrical"),
         "job_expense": ("job", "project", "work order", "site expense", "materials", "lumber", "supplies", "equipment", "tool"),
@@ -363,20 +207,14 @@ def suggested_category(text: str) -> str:
 
 def suggested_fields(text: str) -> dict[str, object | None]:
     detected_date = suggested_date(text)
-    total = suggested_total(text)
-    category = suggested_category(text)
-    litres = suggested_litres(text, total=total)
     return {
         "suggested_vendor": suggested_vendor(text),
-        "suggested_amount": total,
+        "suggested_amount": suggested_total(text),
         "suggested_date": detected_date.isoformat() if detected_date else None,
-        "suggested_category": category,
+        "suggested_category": suggested_category(text),
         "suggested_currency": suggested_currency(text),
-        "suggested_fuel_litres": litres,
-        "suggested_litres": litres,
         "suggested_transaction_type": "expense",
     }
-
 
 
 def suggested_vendor(text: str) -> str | None:

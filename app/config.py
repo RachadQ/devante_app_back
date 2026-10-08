@@ -30,11 +30,9 @@ class Settings(BaseSettings):
     trusted_hosts: str
     auth_cookie_secure: bool = True
     session_cookie_secure: bool = True
-    auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
-    dev_auth_bypass: bool = False
-    dev_auth_email: str = "developer@localhost"
-    dev_auth_name: str = "Local Developer"
+    auth_cookie_samesite: Literal["lax", "strict", "none"] = "none"
     allowed_email_domains: str = ""
+    google_oauth_client_id: str = ""
     max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1024)
     ocr_engine: Literal["paddle", "rapid"] = "paddle"
     google_drive_credentials_json: str = ""
@@ -98,8 +96,14 @@ class Settings(BaseSettings):
             raise RuntimeError("JWT_SECRET and SESSION_SECRET must be different in production")
         if not self.auth_cookie_secure or not self.session_cookie_secure:
             raise RuntimeError("Secure cookies are required in production")
+        if self.auth_cookie_samesite != "none":
+            raise RuntimeError("AUTH_COOKIE_SAMESITE=none is required for the cross-site frontend and API deployment")
+        if not self.google_oauth_client_id.strip():
+            raise RuntimeError("GOOGLE_OAUTH_CLIENT_ID is required in production")
         if not self.origins or "*" in self.origins:
             raise RuntimeError("Explicit CORS origins are required in production")
+        if self.frontend_url not in self.origins:
+            raise RuntimeError("FRONTEND_URL must also be included in CORS_ALLOWED_ORIGINS")
         if urlparse(self.frontend_url).scheme != "https":
             raise RuntimeError("FRONTEND_URL must use HTTPS in production")
         if any(urlparse(origin).scheme != "https" for origin in self.origins):
