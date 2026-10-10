@@ -1,17 +1,20 @@
 import logging
+import os
 import re
+import sys
 from datetime import date, datetime
 from io import BytesIO
+from pathlib import Path
+from tempfile import gettempdir
 from threading import Lock
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageOps
-from rapidocr import RapidOCR
 
 from app.config import get_settings
 
-_rapid_engine: RapidOCR | None = None
+_rapid_engine: Any = None
 _paddle_engine: Any = None
 _paddle_failed = False
 _engine_lock = Lock()
@@ -21,7 +24,17 @@ logger = logging.getLogger(__name__)
 def _extract_with_rapid(image: Image.Image) -> tuple[str, float | None]:
     global _rapid_engine
     if _rapid_engine is None:
-        _rapid_engine = RapidOCR()
+        # The slim RapidOCR package is bundled rather than installed by pip.
+        # Its internal absolute imports require the vendor directory on sys.path.
+        vendor_path = str(Path(__file__).resolve().parents[1] / "vendor")
+        if vendor_path not in sys.path:
+            sys.path.insert(0, vendor_path)
+        from rapidocr import RapidOCR
+
+        params = {}
+        if os.environ.get("VERCEL") == "1":
+            params["Global.model_root_dir"] = str(Path(gettempdir()) / "devante-rapidocr-models")
+        _rapid_engine = RapidOCR(params=params)
     result = _rapid_engine(image)
     if not result or not result.txts:
         return "", None

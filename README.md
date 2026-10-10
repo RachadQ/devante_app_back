@@ -84,8 +84,9 @@ Required authentication settings fail closed when missing.
 
 ### Deployment size
 
-`requirements.txt` is the smaller serverless install: it includes RapidOCR and
-ONNX Runtime, but excludes PaddlePaddle and PaddleOCR and their large dependency
+`requirements.txt` is the smaller serverless install: it includes dependencies
+for the slim RapidOCR package bundled in `app/vendor`, including ONNX Runtime,
+but excludes PaddlePaddle and PaddleOCR and their large dependency
 tree. Set `OCR_ENGINE=rapid` in the deployment environment. `.vercelignore`
 excludes local virtual environments, model caches, uploads, and development files.
 Redeploy without the previous build cache after changing the dependency set;
